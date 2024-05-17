@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+    <style>
+        body {
+            font-family: "Exo", sans-serif;
+            background: #070815;
+            color: white;
+        }
+        h1 {
+            text-align: center;
+            font-weight: lighter;
+        }
+        .login-container {
+            width: 300px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #111;
+            border-radius: 5px;
+            box-shadow: 0px 0px 10px 0px black;
+        }
+        .login-container p {
+            margin-bottom: 15px;
+        }
+        .login-container input[type="submit"] {
+            padding: 10px 20px;
+            font-size: 1.2rem;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            background: #333;
+            color: white;
+        }
+        .login-container input[type="text"], .login-container input[type="password"] {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            font-size: 1.2rem;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            background: transparent;
+        }
+    </style>
+</head>
+<body>
+        <div class="login-container">
+        
+        <h2>Signup</h2>
+        <form method="POST" action="{{ url_for('signup') }}">
+            {{ signup_form.hidden_tag() }}
+            <p>
+                {{ signup_form.email.label }}<br>
+                {{ signup_form.email(size=30) }}
+            </p>
+            <p>
+                {{ signup_form.password.label }}<br>
+                {{ signup_form.password(size=30) }}
+            </p>
+            <p>{{ signup_form.submit() }}</p>
+        </form>
+    </div>
+</body>
+</html>

@@ -1,6 +1,5 @@
 import base64
-import whisper
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session
 from faster_whisper import WhisperModel
 import ollama
 import os
@@ -11,6 +10,11 @@ from melo.api import TTS
 from werkzeug.utils import secure_filename
 from pydub import AudioSegment
 from datetime import datetime
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, SubmitField
+from wtforms.validators import DataRequired, Length, Email
+from flask import flash
 
 
 
@@ -19,6 +23,70 @@ app = Flask(__name__, template_folder=".")
 
 conversation = []
 conversation.append({'role': 'system', 'content': "You are a smart, flirty and witty personal assistant named Sara. You keep your answers short and sweet"})
+
+app.secret_key = 'your secret key'
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+class SignupForm(FlaskForm):
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Signup')
+# User class for Flask-Login
+class User(UserMixin):
+    def __init__(self, id):
+        self.id = id
+
+# Form for login
+class LoginForm(FlaskForm):
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Login')
+
+# User loader for Flask-Login
+@login_manager.user_loader
+def load_user(user_id):
+    return User(user_id)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    login_form = LoginForm()
+    if login_form.validate_on_submit():
+        with open('static/credentials.txt', 'r') as f:
+            for line in f:
+                if ':' not in line:
+                    continue
+                username, password = line.strip().split(':')
+    # Rest of your code here
+                if login_form.email.data == username and login_form.password.data == password:
+                    user = User(login_form.email.data)
+                    login_user(user)
+                    return redirect(url_for('index'))  # Redirect to a protected page after login
+            flash('Incorrect username or password')
+    return render_template('pages/login.html', login_form=login_form)
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    signup_form = SignupForm()
+    if signup_form.validate_on_submit():
+        with open('static/credentials.txt', 'a') as f:
+            f.write(f"{signup_form.email.data}:{signup_form.password.data}\n")
+        flash('Signup successful. You can now login.')
+        return redirect(url_for('login'))  # Redirect to the login page after signup
+    return render_template('pages/signup.html', signup_form=signup_form)
+
+
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))  # Redirect to the login page after logout
+
+
+
 
 def save_conversation_to_file(conversation):
     # Get the current date
@@ -259,6 +327,7 @@ def handle_audio_data():
         return jsonify({'error': str(e)}), 500
 
 @app.route("/")
+@login_required
 def index():
     return render_template("pages/home.html")
 
