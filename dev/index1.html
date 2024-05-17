@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Web-Speech-Socket-Base</title>
+
+        <link
+            href="https://fonts.googleapis.com/css2?family=Exo:wght@400;500;600;700&display=swap"
+            rel="stylesheet"
+        />
+        <script src="https://cdn.socket.io/4.1.2/socket.io.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad/dist/index.browser.js"></script>
+        <style>
+            body {
+                font-family: sans-serif;
+                font-family: "Exo", sans-serif;
+
+                background: #070815;
+                color: white;
+            }
+            h1 {
+                text-align: center;
+                font-weight: lighter;
+            }
+            button {
+                padding: 10px 20px;
+                font-size: 1.2rem;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+            }
+            #resetChat {
+                margin: 0;
+            }
+            textarea {
+                display: block;
+                margin: 0 auto;
+                width: 100%;
+                height: 500px;
+                padding: 10px;
+                font-size: 1.2rem;
+                background: transparent;
+                color: white;
+                font-family: "Exo", sans-serif;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+            }
+            .button-container {
+                display: flex;
+                justify-content: space-between;
+                padding: 0 20px;
+            }
+            #userInput {
+                display: block;
+                width: 100%;
+                padding: 10px;
+                font-size: 1.2rem;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                margin-top: 10px;
+                background: transparent;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>S.A.R.A.</h1>
+        <p id="status"></p>
+        <textarea id="output"></textarea>
+        <input type="text" id="userInput" placeholder="Type your message here...">
+        <div class="button-container">
+            <button id="toggleVAD">Start</button>
+            <button id="resetChat">Reset Chat</button>
+            <button id="record">Record</button>
+        </div>
+        
+    </body>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.3/howler.min.js"></script>
+    <script>
+        const output = document.getElementById("output");
+        const status = document.getElementById("status");
+        const toggleVADButton = document.getElementById("toggleVAD");
+        const resetChatButton = document.getElementById("resetChat");
+        const recordButton = document.getElementById("record");
+
+        
+        let myvad;
+        let isVADRunning = false;
+        let shouldProcessAudio = false;
+        let isProcessing = false;
+        let isRecording = false;
+        let chunks = [];
+        let mediaRecorder;
+
+        async function main() {
+            myvad = await vad.MicVAD.new({
+                positiveSpeechThreshold: 0.8,
+                negativeSpeechThreshold: 0.8 - 0.15,
+                minSpeechFrames: 1,
+                preSpeechPadFrames: 1,
+                redemptionFrames: 2,
+                onSpeechStart: () => {
+                    console.log("Speech start detected");
+                    
+                },
+                onSpeechEnd: async (audio) => {
+                    if (!shouldProcessAudio) {
+                        return;
+                    }
+                    isProcessing = true;
+                    status.innerText = "Processing...";
+                    const wavBuffer = vad.utils.encodeWAV(audio);
+                    const base64 = vad.utils.arrayBufferToBase64(wavBuffer);
+                    let route = '/audio_data';
+                    if (isRecording) {
+                        route = '/recorded_audio_data';
+                    }
+                    // Send a POST request to the /audio_data endpoint
+                    const response = await fetch(route, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ audioData: base64 })
+                    });
+                    if (!isRecording) {
+                        const data = await response.json();
+                        isProcessing = false;
+                        status.innerText = "";
+                        output.value += "\nUser: " + data.transcription.replace(".", " ").replace("  ", " ");
+                        //Update the chat response
+                        output.value += "\nSARA: " + data.chat_response;
+
+                        const timestamp = new Date().getTime();
+                        const responseAudio = await fetch('/static/output.mp3?cb=' + timestamp);
+
+                        const sound = new Howl({
+                            src: ['/static/output.mp3?cb=' + timestamp],
+                            html5: true,
+                            format: ['mp3'],
+                            autoplay: true,
+                            onloaderror: function(id, error) {
+                                console.error('Load error:', error);
+                            },
+                            onplayerror: function(id, error) {
+                                console.error('Play error:', error);
+                            }
+                        });
+                        status.innerText = "Playing...";
+                            
+                        // Autoscroll
+                        output.scrollTop = output.scrollHeight;
+                    }
+                  }
+            });
+            document.getElementById('userInput').addEventListener('keydown', function(event) {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    var userInput = this.value;
+                    fetch('/user_input', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({userInput: userInput}),
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        output.value += "\nUser: " + userInput.replace(".", " ").replace("  ", " ");
+                        output.value += "\nSara: " + data.chat_response;
+                        this.value = '';
+                    });
+                }
+            });
+            recordButton.addEventListener('click', async function() {
+                if (isRecording) {
+                    isRecording = false;
+                    shouldProcessAudio = false;
+                    recordButton.innerText = 'Record';
+                    status.innerText = "";
+                    // Trigger the record_processing route
+                    const response = await fetch('/record_processing', { method: 'POST' });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        console.log('Audio processed successfully');
+                    } else {
+                        console.log('Error processing audio:', data.error);
+                    }
+                } else {
+                    myvad.start();
+                    status.innerText = "Listening...";
+                    isRecording = true;
+                    shouldProcessAudio = true;
+                    recordButton.innerText = 'Stop';
+                }
+            });
+            resetChatButton.addEventListener('click', function() {
+                fetch('/reset', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        output.value = '';
+                    }
+                });
+            });
+            toggleVADButton.addEventListener('click', () => {
+            if (isVADRunning) {
+                toggleVADButton.innerText = 'Start';
+                shouldProcessAudio = false;
+                status.innerText = "";
+            } else {
+                myvad.start();
+                status.innerText = "Listening...";
+                toggleVADButton.innerText = 'Stop';
+                shouldProcessAudio = true;
+            }
+            isVADRunning = !isVADRunning;
+        });
+      }
+        
+
+      main();
+    </script>
+</html>
