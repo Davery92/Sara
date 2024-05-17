@@ -21,10 +21,16 @@ conversation = []
 conversation.append({'role': 'system', 'content': "You are a smart, flirty and witty personal assistant named Sara. You keep your answers short and sweet"})
 
 def save_conversation_to_file(conversation):
-    with open('conversation.txt', 'a') as f:
-        for message in conversation:
-            if message['role'] in ['user', 'assistant']:
-                f.write(f"{message['role']}: {message['content']}\n")
+    # Get the current date
+    now = datetime.now()
+    # Format the date as a string
+    date_string = now.strftime("%A, %B %d")
+    # Create the filename
+    filename = f'static/past_conversations/{date_string}.txt'
+    with open(filename, 'a') as f:
+        message = conversation[-2]  # Get the last message in the conversation
+        if message['role'] in ['user', 'assistant']:
+            f.write(f"{message['role']}: {message['content']}\n")
 
 model_size = "large-v3"
 # Run on GPU with FP16
@@ -88,8 +94,45 @@ def whisper_processing(audio_path):
         print("[%.2fs -> %.2fs] %s" % (segment.start, segment.end, segment.text))
         trans = ""
         trans += segment.text + " "
-        trans = trans.strip()
-        return trans
+    trans = trans.strip()
+    return trans
+@app.route('/about')
+def about():
+    return render_template('pages/about.html')
+
+@app.route('/recorded_conversations')
+def recorded_conversations():
+    files = os.listdir('static/recorded_conversations/')
+    return render_template('pages/recorded_conversations.html', files=files)
+
+@app.route('/past_conversations')
+def past_conversations():
+    files = os.listdir('static/past_conversations/')
+    return render_template('pages/past_conversations.html', files=files)
+
+@app.route('/delete_rec_file', methods=['POST'])
+def delete_rec_file():
+    data = request.get_json()
+    filename = data.get('filename')
+    if filename:
+        try:
+            os.remove(os.path.join('static/recorded_conversations', filename))
+            return '', 200  # Return a success status
+        except OSError:
+            pass
+    return '', 400  # Return an error status if the file couldn't be deleted
+
+@app.route('/delete_conv_file', methods=['POST'])
+def delete_conv_file():
+    data = request.get_json()
+    filename = data.get('filename')
+    if filename:
+        try:
+            os.remove(os.path.join('static/past_conversations', filename))
+            return '', 200  # Return a success status
+        except OSError:
+            pass
+    return '', 400  # Return an error status if the file couldn't be deleted
 
 @app.route("/user_input", methods=['POST'])
 def handle_user_input():
@@ -114,6 +157,17 @@ def handle_user_input():
         app.logger.error(f"Error occurred: {e}")
         return jsonify({'error': str(e)}), 500
 
+def format_date(dt):
+    # Get the day of the month
+    day = dt.day
+    # Determine the suffix
+    if 4 <= day <= 20 or 24 <= day <= 30:
+        suffix = "th"
+    else:
+        suffix = ["st", "nd", "rd"][day % 10 - 1]
+    # Format the date
+    return dt.strftime(f"%A, %B {day}{suffix}, %Y %I-%M%p")
+
 @app.route("/record_processing", methods=['POST'])
 def handle_record_processing():
     try:
@@ -124,9 +178,9 @@ def handle_record_processing():
         # Get the current date and time
         now = datetime.now()
         # Format the date and time as a string
-        date_time = now.strftime("%Y-%m-%d_%H-%M")
+        date_time = format_date(now)
         # Create the output file path
-        output_path = f"E:\\Projects\\Sara\\dev\\static\\{date_time}.txt"
+        output_path = f"E:\\Projects\\Sara\\dev\\static\\recorded_conversations\\{date_time}.txt"
         with open(output_path, 'w') as f:
             f.write(processed_audio)
         # Save the processed audio data to the output file
@@ -198,6 +252,7 @@ def handle_audio_data():
         if chat_response is None:
             raise Exception("Failed to generate chat response after 3 attempts")
         process_and_play(chat_response)
+        save_conversation_to_file(conversation)
         return jsonify({'transcription': result, 'chat_response': chat_response})
     except Exception as e:
         app.logger.error(f"Error occurred: {e}")
@@ -205,7 +260,7 @@ def handle_audio_data():
 
 @app.route("/")
 def index():
-    return render_template("index1.html")
+    return render_template("pages/home.html")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)

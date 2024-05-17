@@ -127,9 +127,10 @@
         </div>
         <div id="mySidenav" class="sidenav">
             <a href="javascript:void(0)" class="closebtn" onclick="closeNav()">&times;</a>
-            <a href="#">Home</a>
+            <a href="{{ url_for('index') }}">Home</a>
             <a href="{{ url_for('about') }}">About</a>
-            <a href="#">Recorded Conversations</a>
+            <a href="{{ url_for('recorded_conversations') }}">Recorded Conversations</a>
+            <a href="{{ url_for('past_conversations') }}">Past Conversations</a>
             
             
         </div>

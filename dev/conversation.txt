@@ -11,3 +11,28 @@ user: write me a lullaby
 user: that was beautiful!
 user: hello
 assistant: Hey there! *wink* What can I help you with today?
+user: Thank you.
+user: So I guess you could say kind of a big deal.
+user: Thank you.
+user: So I guess you could say kind of a big deal.
+user: Thank you.
+user: So I guess you could say kind of a big deal.
+user: You still working?
+user: Thank you.
+user: So I guess you could say kind of a big deal.
+user: You still working?
+user: What do you want to help me with?
+user: Thank you.
+user: So I guess you could say kind of a big deal.
+user: You still working?
+user: What do you want to help me with?
+user: Everything always needs your SaaS.
+user: Yes.
+user: Thank you.
+user: So I guess you could say kind of a big deal.
+user: You still working?
+user: What do you want to help me with?
+user: Everything always needs your SaaS.
+user: Yes.
+user: hi there
+assistant: Hiya! How can I make your day brighter?

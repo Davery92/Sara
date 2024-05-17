@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <style>
+            /* ... existing styles ... */
+            body {
+                font-family: sans-serif;
+                font-family: "Exo", sans-serif;
+
+                background: #070815;
+                color: white;
+            }
+            h1 {
+                text-align: center;
+                font-weight: lighter;
+            }
+            .sidenav {
+                height: 100%;
+                width: 0;
+                position: fixed;
+                z-index: 1;
+                top: 0;
+                left: 0;
+                background-color: #111;
+                overflow-x: hidden;
+                transition: 0.5s;
+                padding-top: 60px;
+            }
+
+            .sidenav a {
+                padding: 8px 8px 8px 32px;
+                text-decoration: none;
+                font-size: 25px;
+                color: #818181;
+                display: block;
+                transition: 0.3s;
+            }
+
+            .sidenav a:hover {
+                color: #f1f1f1;
+            }
+
+            .sidenav .closebtn {
+                position: absolute;
+                top: 0;
+                right: 25px;
+                font-size: 36px;
+                margin-left: 50px;
+            }
+
+            #menuButton {
+                position: absolute;
+                top: 0;
+                left: 0;
+                background: transparent;
+                border: none;
+            }
+
+            #menuButton div {
+                width: 35px;
+                height: 5px;
+                background-color: #333;
+                margin: 6px 0;
+                transition: 0.4s;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>S.A.R.A.</h1>
+        <div id="mySidenav" class="sidenav">
+            <a href="javascript:void(0)" class="closebtn" onclick="closeNav()">&times;</a>
+            <a href="{{ url_for('index') }}">Home</a>
+            <a href="{{ url_for('about') }}">About</a>
+            <a href="{{ url_for('recorded_conversations') }}">Recorded Conversations</a>
+            <a href="{{ url_for('past_conversations') }}">Past Conversations</a>
+        </div>
+        <button id="menuButton" onclick="openNav()">
+            <div></div>
+            <div></div>
+            <div></div>
+        </button>
+        <h2>THIS IS THE ABOUT SECTION. REPLACE ME</h2>
+        <script>
+            /* Add scripts to open and close the side menu */
+            function openNav() {
+                document.getElementById("mySidenav").style.width = "250px";
+            }
+
+            function closeNav() {
+                document.getElementById("mySidenav").style.width = "0";
+            }
+        </script>
+    </body>
+</html>
