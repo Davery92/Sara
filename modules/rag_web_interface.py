@@ -17,7 +17,7 @@ web_router = APIRouter(prefix="/rag", tags=["Web Interface"])
 
 # Define the path to the HTML file
 CURRENT_DIR = Path(__file__).parent
-STATIC_DIR = Path("/home/david/Sara/static/static")  # Convert to Path object
+STATIC_DIR = Path("/home/david/Sara/static")  # Convert to Path object
 HTML_FILE = STATIC_DIR / "rag_interface.html"
 
 # Ensure the static directory exists
@@ -431,9 +431,31 @@ def create_html_file():
             function loadDocuments() {
                 documentList.innerHTML = '<div class="loader"></div>';
                 
-                fetch(`${apiBaseUrl}/documents`)
-                .then(response => response.json())
+                // Use a more direct approach with better error handling
+                fetch(`${apiBaseUrl}/documents`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',  // Explicitly request JSON
+                        'Cache-Control': 'no-cache'    // Avoid caching issues
+                    }
+                })
+                .then(response => {
+                    // First check the content type
+                    const contentType = response.headers.get('content-type');
+                    if (!contentType || !contentType.includes('application/json')) {
+                        // Not JSON, likely an HTML error page
+                        return response.text().then(text => {
+                            // Log the error for debugging
+                            console.error('Non-JSON response received:', text.substring(0, 200) + '...');
+                            throw new Error('Server returned non-JSON response');
+                        });
+                    }
+                    
+                    // It's JSON, so parse it
+                    return response.json();
+                })
                 .then(data => {
+                    console.log('Documents data:', data);
                     if (data.documents && data.documents.length > 0) {
                         displayDocuments(data.documents);
                     } else {
@@ -441,8 +463,115 @@ def create_html_file():
                     }
                 })
                 .catch(error => {
-                    documentList.innerHTML = `<p>Document: ${error.message}</p>`;
+                    console.error('Error loading documents:', error);
+                    documentList.innerHTML = `
+                        <div class="error-container">
+                            <p>Error loading documents: ${error.message}</p>
+                            <p>Please check the server logs for more information.</p>
+                            <button id="retry-btn" class="btn">Retry</button>
+                            <button id="debug-btn" class="btn">Run Diagnostics</button>
+                        </div>
+                    `;
+                    
+                    // Add event listeners for the buttons
+                    document.getElementById('retry-btn').addEventListener('click', loadDocuments);
+                    document.getElementById('debug-btn').addEventListener('click', runDiagnostics);
                 });
+            }
+
+            // Add this new diagnostic function
+            function runDiagnostics() {
+                documentList.innerHTML = '<div class="loader"></div><p>Running diagnostics...</p>';
+                
+                // First check the health endpoint
+                fetch(`${apiBaseUrl}/health/documents`)
+                .then(response => response.json())
+                .catch(e => ({ status: 'error', error: e.message }))
+                .then(healthData => {
+                    // Then check the debug endpoint
+                    return fetch(`${apiBaseUrl}/debug/documents`)
+                        .then(response => response.json())
+                        .catch(e => ({ error: e.message }))
+                        .then(debugData => {
+                            // Combine and display results
+                            displayDiagnostics(healthData, debugData);
+                        });
+                })
+                .catch(error => {
+                    documentList.innerHTML = `<p>Diagnostics failed: ${error.message}</p>`;
+                });
+            }
+
+            // Function to display diagnostic information
+            function displayDiagnostics(healthData, debugData) {
+                const healthStatus = healthData.status || 'unknown';
+                const healthClass = healthStatus === 'healthy' ? 'success' : 
+                                    (healthStatus === 'degraded' ? 'warning' : 'error');
+                
+                documentList.innerHTML = `
+                    <div class="diagnostic-results">
+                        <h3>System Diagnostics</h3>
+                        
+                        <div class="diagnostic-section">
+                            <h4>API Health <span class="status ${healthClass}">${healthStatus}</span></h4>
+                            <pre>${JSON.stringify(healthData, null, 2)}</pre>
+                        </div>
+                        
+                        <div class="diagnostic-section">
+                            <h4>Debug Information</h4>
+                            <pre>${JSON.stringify(debugData, null, 2)}</pre>
+                        </div>
+                        
+                        <div class="actions">
+                            <button id="retry-after-diag" class="btn">Retry Loading Documents</button>
+                            <button id="clear-redis" class="btn btn-danger">Clear Document Cache</button>
+                        </div>
+                    </div>
+                `;
+                
+                // Add event listeners
+                document.getElementById('retry-after-diag').addEventListener('click', loadDocuments);
+                document.getElementById('clear-redis').addEventListener('click', confirmClearCache);
+                
+                // Add CSS for diagnostics
+                const style = document.createElement('style');
+                style.textContent = `
+                    .diagnostic-results { padding: 15px; }
+                    .diagnostic-section { margin-bottom: 20px; background: #f5f5f5; padding: 10px; border-radius: 5px; }
+                    .diagnostic-section pre { overflow: auto; max-height: 200px; }
+                    .status { padding: 3px 8px; border-radius: 3px; font-size: 12px; }
+                    .success { background: #d4edda; color: #155724; }
+                    .warning { background: #fff3cd; color: #856404; }
+                    .error { background: #f8d7da; color: #721c24; }
+                    .actions { margin-top: 20px; }
+                `;
+                document.head.appendChild(style);
+            }
+
+            // Function to confirm cache clearing
+            function confirmClearCache() {
+                if (confirm('Are you sure you want to clear the document cache? This will remove all document information from Redis.')) {
+                    documentList.innerHTML = '<div class="loader"></div><p>Clearing document cache...</p>';
+                    
+                    // Call a special endpoint to clear the cache
+                    fetch(`${apiBaseUrl}/clear-cache`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ confirmation: true })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        documentList.innerHTML = `<p>${data.message || 'Cache cleared successfully'}</p>`;
+                        
+                        // Reload after a short delay
+                        setTimeout(loadDocuments, 2000);
+                    })
+                    .catch(error => {
+                        documentList.innerHTML = `<p>Error clearing cache: ${error.message}</p>`;
+                    });
+                }
             }
             
             function displayDocuments(documents) {
@@ -474,12 +603,18 @@ def create_html_file():
                             <div>${tagsHtml}</div>
                         </div>
                         <div>
+                            <button class="btn download-doc" data-id="${doc.id}">Download</button>
                             <button class="btn btn-danger delete-doc" data-id="${doc.id}">Delete</button>
                         </div>
                     `;
                     
                     documentList.appendChild(docItem);
                     
+                    // Add download event listener
+                    docItem.querySelector('.download-doc').addEventListener('click', () => {
+                        window.open(`${apiBaseUrl}/documents/${doc.id}/download`, '_blank');
+                    });
+
                     // Add delete event listener
                     docItem.querySelector('.delete-doc').addEventListener('click', () => {
                         if (confirm(`Are you sure you want to delete "${doc.title || 'this document'}"?`)) {
@@ -528,7 +663,7 @@ def create_html_file():
                     displaySearchResults(data);
                 })
                 .catch(error => {
-                    searchResults.innerHTML = `<p>Error searching: ${error.message}</p>`;
+                    searchResults.innerHTML = `<p>Uploaded Document! ${error.message}</p>`;
                 });
             }
             
@@ -574,6 +709,8 @@ def create_html_file():
     </script>
 </body>
 </html>
+
+
 """
     
     # Write the HTML file

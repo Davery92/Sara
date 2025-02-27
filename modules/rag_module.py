@@ -20,6 +20,7 @@ import tiktoken
 from redis.commands.search.field import TextField, VectorField, TagField, NumericField
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from rank_bm25 import BM25Okapi
+import traceback
 
 # Configure logging
 logger = logging.getLogger("rag-module")
@@ -65,12 +66,17 @@ def get_reranker():
     return reranker_model, reranker_tokenizer
 
 class RAGManager:
+
+    DOCUMENTS_DIRECTORY = "/home/david/Sara/documents"
+
     def __init__(self, redis_client):
         """Initialize the RAG manager with Redis client"""
         self.redis_client = redis_client
         self.docs_index_name = "docs_idx"
         self.chunks_index_name = "chunks_idx"
         self._ensure_indices()
+
+        os.makedirs(self.DOCUMENTS_DIRECTORY, exist_ok=True)
         
     def _ensure_indices(self):
         """Create the necessary Redis indices if they don't exist"""
@@ -136,8 +142,30 @@ class RAGManager:
             except Exception as e:
                 logger.error(f"Error creating chunks index: {e}")
     
+    def _create_clean_filename(self, title: str, content_type: str) -> str:
+        """
+        Create a clean filename from the title and content type
+        that is safe for filesystem use
+        """
+        # Remove any characters that might cause issues in filenames
+        clean_title = re.sub(r'[^\w\s-]', '', title).strip()
+        clean_title = re.sub(r'[-\s]+', '-', clean_title)
+        
+        # Get the appropriate extension based on content type
+        extension = content_type.split('/')[-1]
+        if extension == 'octet-stream':
+            # Try to guess extension from the title if content_type is generic
+            title_ext = os.path.splitext(title)[1]
+            if title_ext:
+                extension = title_ext.lstrip('.')
+            else:
+                extension = 'bin'  # Default binary extension
+        
+        # Create the filename with extension
+        return f"{clean_title}.{extension}"
+
     def process_document(self, file_path: str, filename: str, content_type: str, 
-                          title: Optional[str] = None, tags: Optional[List[str]] = None) -> Dict[str, Any]:
+                      title: Optional[str] = None, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Process a document:
         1. Store document metadata
@@ -164,10 +192,14 @@ class RAGManager:
             if not title:
                 title = os.path.splitext(filename)[0]  # Use filename without extension as title
                 
+            # Create a clean filename for storage
+            clean_title = self._create_clean_filename(title, content_type)
+            
             doc_metadata = {
                 "id": doc_id,
                 "title": title,
                 "filename": filename,
+                "storage_filename": clean_title,  # Add the clean filename to metadata
                 "content_type": content_type,
                 "size": file_size,
                 "tags": tags or [],
@@ -196,12 +228,27 @@ class RAGManager:
             # Update document with hash
             self.redis_client.redis_client.json().set(f"doc:{doc_id}", '$', doc_metadata)
             
-            # Save document to disk as backup
-            doc_file_path = os.path.join(DOCUMENTS_DIRECTORY, f"{doc_id}.{content_type.split('/')[-1]}")
-            with open(doc_file_path, 'wb') as f:
+            # Save document to disk as backup - MODIFIED TO USE BETTER NAMING
+            # Create a directory structure for better organization
+            doc_storage_dir = os.path.join(DOCUMENTS_DIRECTORY, doc_id)
+            os.makedirs(doc_storage_dir, exist_ok=True)
+            
+            # Save with original title for usability
+            original_doc_path = os.path.join(doc_storage_dir, clean_title)
+            with open(original_doc_path, 'wb') as f:
                 f.write(file_content)
             
-            logger.info(f"Processed document: {title} ({doc_id}) with {len(chunks)} chunks")
+            # Also save JSON metadata for easy retrieval
+            metadata_path = os.path.join(doc_storage_dir, "metadata.json")
+            with open(metadata_path, 'w') as f:
+                json.dump(doc_metadata, f, indent=2)
+            
+            # Add paths to metadata
+            doc_metadata["file_path"] = original_doc_path
+            doc_metadata["metadata_path"] = metadata_path
+            self.redis_client.redis_client.json().set(f"doc:{doc_id}", '$', doc_metadata)
+            
+            logger.info(f"Processed document: {title} ({doc_id}) with {len(chunks)} chunks, saved to {original_doc_path}")
             return doc_metadata
             
         except Exception as e:
@@ -656,8 +703,8 @@ class RAGManager:
             return {"error": str(e)}
     
     def list_documents(self, limit: int = 100, offset: int = 0, 
-                      filter_tags: Optional[List[str]] = None) -> Dict[str, Any]:
-        """List all documents with pagination and filtering"""
+                  filter_tags: Optional[List[str]] = None) -> Dict[str, Any]:
+        """List all documents with pagination and filtering - with improved error handling"""
         try:
             # Build query based on filters
             if filter_tags and len(filter_tags) > 0:
@@ -666,32 +713,81 @@ class RAGManager:
             else:
                 query = "*"
             
-            # Execute the search
-            results = self.redis_client.redis_client.ft(self.docs_index_name).search(
-                query,
-                limit=offset, limit_num=limit,
-                sort_by="date_added", sort_desc=True
-            )
-            
-            # Process results
-            docs = []
-            for doc in results.docs:
-                doc_data = json.loads(doc.json)
-                docs.append(doc_data)
-            
-            return {
-                "documents": docs,
-                "total": results.total,
-                "offset": offset,
-                "limit": limit
-            }
-            
+            # Try to execute search via index
+            try:
+                results = self.redis_client.redis_client.ft(self.docs_index_name).search(
+                    query,
+                    limit=offset, limit_num=limit,
+                    sort_by="date_added", sort_desc=True
+                )
+                
+                # Process results
+                docs = []
+                for doc in results.docs:
+                    try:
+                        doc_data = json.loads(doc.json)
+                        docs.append(doc_data)
+                    except Exception as e:
+                        logger.error(f"Error parsing document JSON: {e}")
+                        # Skip this document but continue processing
+                        continue
+                        
+                return {
+                    "documents": docs,
+                    "total": results.total,
+                    "offset": offset,
+                    "limit": limit
+                }
+                
+            except Exception as e:
+                logger.warning(f"Search index error: {e}, falling back to manual listing")
+                
+                # Fallback: manual listing from Redis keys
+                doc_keys = self.redis_client.redis_client.keys("doc:*")
+                total_count = len(doc_keys)
+                
+                # Sort and paginate keys (basic implementation)
+                sorted_keys = sorted(doc_keys, reverse=True)
+                paginated_keys = sorted_keys[offset:offset+limit]
+                
+                # Retrieve document data
+                docs = []
+                for key in paginated_keys:
+                    try:
+                        doc_data = self.redis_client.redis_client.json().get(key)
+                        
+                        # Filter by tags if needed
+                        if filter_tags and len(filter_tags) > 0:
+                            doc_tags = doc_data.get("tags", [])
+                            if not any(tag in doc_tags for tag in filter_tags):
+                                continue
+                                
+                        docs.append(doc_data)
+                    except Exception as doc_e:
+                        logger.error(f"Error retrieving document {key}: {doc_e}")
+                        # Skip this document but continue processing
+                        continue
+                
+                return {
+                    "documents": docs,
+                    "total": total_count,
+                    "offset": offset,
+                    "limit": limit,
+                    "note": "Used fallback listing method"
+                }
+                
         except Exception as e:
             logger.error(f"Error listing documents: {e}")
-            return {"documents": [], "total": 0, "error": str(e)}
+            # Always return a valid JSON response, even in case of error
+            return {
+                "documents": [],
+                "total": 0,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
     
     def delete_document(self, doc_id: str) -> Dict[str, Any]:
-        """Delete a document and all its chunks"""
+        """Delete a document and all its chunks - Updated to handle new storage structure"""
         try:
             # Get document first to verify it exists
             doc_key = f"doc:{doc_id}"
@@ -711,13 +807,10 @@ class RAGManager:
             # Delete document
             self.redis_client.redis_client.delete(doc_key)
             
-            # Delete file from disk if it exists
-            content_type = doc_data.get("content_type", "")
-            extension = content_type.split("/")[-1]
-            doc_file_path = os.path.join(DOCUMENTS_DIRECTORY, f"{doc_id}.{extension}")
-            
-            if os.path.exists(doc_file_path):
-                os.remove(doc_file_path)
+            # Delete document directory from disk if it exists
+            doc_dir_path = os.path.join(DOCUMENTS_DIRECTORY, doc_id)
+            if os.path.exists(doc_dir_path):
+                shutil.rmtree(doc_dir_path)
             
             logger.info(f"Deleted document {doc_id} with {len(chunk_keys)} chunks")
             

@@ -31,6 +31,8 @@ from modules.rag_module import RAGManager
 from modules.rag_api import rag_router  # Import this first
 from modules.rag_web_interface import integrate_web_interface
 from modules.rag_integration import integrate_rag_with_server, update_system_prompt_with_rag_info
+from fastapi.middleware.cors import CORSMiddleware
+
 
 
 
@@ -49,6 +51,14 @@ logging.basicConfig(
 logger = logging.getLogger("openai-compatible-server")
 
 app = FastAPI(title="OpenAI API Compatible Server")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this in production!
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Define the notes directory
 NOTES_DIRECTORY = "/home/david/Sara/notes"
