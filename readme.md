@@ -198,7 +198,7 @@ logging.FileHandler("./logs/openai_server.log")
 Run the server with:
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 7009 --reload
+uvicorn server:app --host 0.0.0.0 --port 7009 --reload
 ```
 
 ### API Endpoints
@@ -301,7 +301,7 @@ You can make these replacements using your code editor's search and replace feat
 
 1. **Create a backup of your original code**:
    ```bash
-   cp main.py main.py.backup
+   cp server.py server.py.backup
    ```
 
 2. **Update import paths** if needed:

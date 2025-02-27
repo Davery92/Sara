@@ -122,6 +122,7 @@ class RedisClient:
                 TextField("$.role", as_name="role"),               # user or assistant
                 TextField("$.content", as_name="content"),         # message content
                 TextField("$.conversation_id", as_name="conversation_id"),  # to group messages
+                TextField("$.conversation_date", as_name="conversation_date"),  # For time-based filtering
                 TagField("$.date", as_name="date"),                # for filtering by date
                 VectorField("$.embedding", 
                            "HNSW", {                                # vector index for similarity search
@@ -335,6 +336,38 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         content={"detail": exc.detail}
     )@app.get("/")
 
+@app.post("/v1/memory/search")
+async def search_memories(request: dict = Body(...)):
+    """Search for memories based on a query"""
+    query = request.get("query", "")
+    limit = request.get("limit", 5)
+    
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    
+    # Get embedding
+    embedding = text_to_embedding_ollama(query)['embeddings']
+    
+    # Search
+    results = redis_client.vector_search(embedding, k=limit)
+    
+    return {"memories": results}
+
+@app.get("/v1/memory/recent")
+async def get_recent_memories(days: int = 7, limit: int = 5):
+    """Get recent conversation summaries"""
+    return {"recent_conversations": get_recent_conversations(days, limit)}
+
+@app.get("/v1/memory/profile/{user_id}")
+async def get_user_profile(user_id: str):
+    """Get the user profile information"""
+    profile = read_note(f"user_profile_{user_id}")
+    if "error" in profile:
+        return {"profile": "No profile information available"}
+    return {"profile": profile}
+
+
+
 async def root():
     """Root endpoint to help diagnose connection issues"""
     logger.info("Root endpoint called")
@@ -350,6 +383,71 @@ async def root():
         },
         "timestamp": datetime.now().isoformat()
     }@app.middleware("http")
+
+def get_recent_conversations(days=7, limit=5):
+    """Get summaries of recent conversations within the specified time period"""
+    today = datetime.now()
+    start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+    
+    query = f"@conversation_id:summary-* @date:[{start_date} +inf]"
+    results = redis_client.redis_client.ft("message_idx").search(
+        query,
+        sort_by="date",
+        sortby_desc=True,
+        limit=0, limit_num=limit
+    )
+    
+    summaries = []
+    for doc in results.docs:
+        message = json.loads(doc.json)
+        summaries.append({
+            "date": message["date"],
+            "summary": message["content"]
+        })
+    
+    return summaries
+
+def update_user_profile(user_id, conversation_id):
+    """Update user profile based on conversation"""
+    # Get conversation messages
+    messages = redis_client.get_messages_by_conversation(conversation_id)
+    
+    # Prepare prompt to extract user information
+    extract_prompt = "Based on this conversation, what new information did we learn about the user? List any preferences, interests, or personal details mentioned."
+    
+    # Format conversation for the model
+    formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+    
+    # Make model request
+    extract_messages = [
+        {'role': 'system', 'content': extract_prompt},
+        {'role': 'user', 'content': formatted_convo}
+    ]
+    
+    # Get extraction
+    response = asyncio.run(fetch_ollama_response(extract_messages, "llama3.1", stream=False))
+    if 'message' in response and 'content' in response['message']:
+        new_info = response['message']['content']
+        
+        # Store in a user profile note
+        profile_note = read_note(f"user_profile_{user_id}")
+        if "error" in profile_note:
+            # Create new profile
+            create_note(
+                title=f"User Profile: {user_id}",
+                content=new_info,
+                tags=["user_profile", user_id]
+            )
+        else:
+            # Append to existing profile
+            append_note(
+                identifier=f"user_profile_{user_id}",
+                content=f"\nUpdated {datetime.now().strftime('%Y-%m-%d')}:\n{new_info}"
+            )
+        
+        return new_info
+    return None
+
 
 def load_system_prompt():
     """Load the system prompt from a file"""
@@ -504,6 +602,12 @@ def get_core_memory_stats() -> Dict[str, Any]:
             "sample": []
         }
 
+async def maybe_summarize_conversation(conversation_id):
+    """Summarize only if the conversation is substantial"""
+    messages = redis_client.get_messages_by_conversation(conversation_id)
+    if len(messages) >= 10:  # Only summarize conversations with 10+ messages
+        return await summarize_conversation(conversation_id)
+    return None
 
 def list_notes() -> List[Dict[str, Any]]:
     """List all available notes with metadata"""
@@ -573,6 +677,41 @@ def create_note(title: str, content: str, tags: Optional[List[str]] = None) -> D
     except Exception as e:
         logger.error(f"Error creating note: {e}")
         return {"error": str(e)}
+
+async def summarize_conversation(conversation_id):
+    """Summarize a conversation and store it as a higher-level memory"""
+    # Get all messages for this conversation
+    messages = redis_client.get_messages_by_conversation(conversation_id)
+    
+    # Format the conversation for summarization
+    formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+    
+    # Prepare system prompt for summarization
+    system_prompt = "Summarize the key points of this conversation in 2-3 sentences. Focus on what information was shared and what was learned about the user."
+    
+    # Create summarization request
+    summary_messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': f"Here's the conversation to summarize:\n\n{formatted_convo}"}
+    ]
+    
+    # Get summary
+    response = await fetch_ollama_response(summary_messages, "llama3.1", stream=False)
+    if 'message' in response and 'content' in response['message']:
+        summary = response['message']['content']
+        
+        # Store this summary with a special tag for easier retrieval
+        today = datetime.now()
+        redis_client.store_message(
+            role='system',
+            content=summary,
+            conversation_id=f"summary-{conversation_id}",
+            date=today,
+            embedding=text_to_embedding_ollama(summary)['embeddings']
+        )
+        
+        return summary
+    return None
 
 def read_note(identifier: str) -> Dict[str, Any]:
     """Read a note by title or filename"""
@@ -709,6 +848,24 @@ async def log_requests(request: Request, call_next):
         # Log any exceptions
         logger.error(f"Request failed: {method} {url} - Error: {str(e)}")
         raise
+
+async def retrieve_relevant_memories(user_query, k=5):
+    """Retrieve relevant past conversations based on the user query"""
+    # Get embedding for the current query
+    query_embedding = text_to_embedding_ollama(user_query)
+    
+    # Search for similar past messages
+    similar_messages = redis_client.vector_search(query_embedding['embeddings'], k=k)
+    
+    # Format into conversational context
+    if similar_messages:
+        memory_context = "Relevant past conversations:\n\n"
+        for i, msg in enumerate(similar_messages):
+            memory_context += f"Memory {i+1}:\n"
+            memory_context += f"Role: {msg['role']}\n"
+            memory_context += f"Content: {msg['content']}\n\n"
+        return memory_context
+    return ""
 
 
 
@@ -1320,7 +1477,7 @@ class EmbeddingRequest(BaseModel):
 
 # OpenAI API Compatible Endpoints
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(request: ChatCompletionRequest, background_tasks: BackgroundTasks):
     global current_chat
     
     # Generate a unique ID for this conversation
@@ -1333,15 +1490,32 @@ async def chat_completions(request: ChatCompletionRequest):
     model = request.model
     stream = request.stream
     tools = request.tools or TOOL_DEFINITIONS  # Always use tools
-    
+    background_tasks.add_task(maybe_summarize_conversation, conversation_id)
+    background_tasks.add_task(update_user_profile, request.user or "default_user", conversation_id)
     logger.info(f"Chat completion request: model={model}, stream={stream}, with {len(messages)} messages")
     
     # Remove any existing system prompts
     messages = [msg for msg in messages if msg['role'] != 'system']
     
     # Always add our system prompt from the file as the first message
-    messages.insert(0, {'role': 'system', 'content': SYSTEM_PROMPT})
-    logger.info("Added system prompt to messages")
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Add system prompt with current date/time
+    system_prompt_with_datetime = f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}"
+    
+    # Always add our system prompt from the file as the first message
+    messages.insert(0, {'role': 'system', 'content': system_prompt_with_datetime})
+    
+    user_message = next((msg for msg in request.messages if msg['role'] == 'user'), None)
+    if user_message:
+        memory_context = await retrieve_relevant_memories(user_message['content'])
+        if memory_context:
+            # Add memory context right after the system prompt
+            memory_system_message = {
+                'role': 'system',
+                'content': f"The following are relevant memories from past conversations that may help with this request:\n\n{memory_context}\n\nUse these memories if they're relevant to the current conversation."
+            }
+            messages.insert(1, memory_system_message)
     
     # Store the conversation
     for message in messages:
