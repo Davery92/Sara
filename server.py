@@ -24,19 +24,20 @@ from redis.commands.search.field import (
     TagField
 )
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
-from modules.redis_client import RedisClient
 import os
 from fastapi import BackgroundTasks
-from modules.rag_module import RAGManager
+from modules.neo4j_rag_integration import Neo4jRAGManager, get_neo4j_rag_manager
 from modules.rag_api import rag_router  # Import this first
 from modules.rag_web_interface import integrate_web_interface
 from modules.rag_integration import integrate_rag_with_server, update_system_prompt_with_rag_info
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
+from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
 
 
 
-redis_client = RedisClient(host='localhost', port=6379, db=0)
+# Initialize the message store with Neo4j backend
+message_store = get_message_store(use_neo4j=True)
 
 # Configure logging
 logging.basicConfig(
@@ -104,7 +105,7 @@ MODEL_URLS = {
 # Redis connection setup
 class RedisClient:
     def __init__(self, host='localhost', port=6379, db=0):
-        self.redis_client = redis.Redis(
+        self.message_store = redis.Redis(
             host=host,
             port=port,
             db=db,
@@ -123,7 +124,7 @@ class RedisClient:
         """Create the necessary indices for vector search and conversation history"""
         # Check if index already exists
         try:
-            self.redis_client.ft("message_idx").info()
+            self.message_store.ft("message_idx").info()
             print("Message index already exists")
         except:
             # Define schema for conversation messages
@@ -143,7 +144,7 @@ class RedisClient:
             
             # Create index
             try:
-                self.redis_client.ft("message_idx").create_index(
+                self.message_store.ft("message_idx").create_index(
                     schema,
                     definition=IndexDefinition(
                         prefix=["message:"],
@@ -176,7 +177,7 @@ class RedisClient:
         
         # Store the main message data first
         try:
-            self.redis_client.json().set(message_id, '$', message_data)
+            self.message_store.json().set(message_id, '$', message_data)
             
             # If embedding is provided, store it separately
             if embedding is not None:
@@ -196,7 +197,7 @@ class RedisClient:
         """Retrieve all messages for a specific conversation, ordered by timestamp"""
         try:
             # Get all message keys for this conversation
-            raw_keys = self.redis_client.keys(f"message:{conversation_id}:*")
+            raw_keys = self.message_store.keys(f"message:{conversation_id}:*")
             
             # Filter out embedding keys
             message_keys = []
@@ -214,7 +215,7 @@ class RedisClient:
                 try:
                     # Try to get JSON data safely
                     try:
-                        json_data = self.redis_client.json().get(key)
+                        json_data = self.message_store.json().get(key)
                         
                         if json_data and isinstance(json_data, dict):
                             # Extract just the data we need
@@ -227,7 +228,7 @@ class RedisClient:
                         logger.warning(f"Error getting JSON for key {key}: {json_err}")
                         # Try alternative retrieval method
                         try:
-                            raw_data = self.redis_client.get(key)
+                            raw_data = self.message_store.get(key)
                             if raw_data and isinstance(raw_data, bytes):
                                 try:
                                     # Try to decode and parse as JSON
@@ -267,7 +268,7 @@ class RedisClient:
         )
         
         # Execute the query
-        results = self.redis_client.ft("message_idx").search(
+        results = self.message_store.ft("message_idx").search(
             query,
             query_params={"query_vector": query_vector}
         )
@@ -287,7 +288,7 @@ class RedisClient:
 # Update the startup_event function
 @app.on_event("startup")
 async def startup_event():
-    """Log when the server starts up and check Redis connection"""
+    """Log when the server starts up and check database connections"""
     global SYSTEM_PROMPT, TOOL_SYSTEM_PROMPT_TEMPLATE
     
     logger.info("=" * 50)
@@ -311,19 +312,20 @@ async def startup_event():
     TOOL_SYSTEM_PROMPT_TEMPLATE = load_tool_system_prompt()
     logger.info("Tool system prompt template loaded")
     
-    # Check Redis connection
-    if redis_client.ping():
-        logger.info("Connected to Redis successfully")
+    # Check database connection
+    if message_store.ping():
+        logger.info("Connected to database successfully")
     else:
-        logger.warning("Failed to connect to Redis - vector functionality may be limited")
+        logger.warning("Failed to connect to database - functionality may be limited")
+    
+    # Integrate Neo4j with the server
+    integrate_neo4j_with_server(app)
+    logger.info("Neo4j module integrated with server")
     
     # Integrate RAG with the server
     integrate_rag_with_server(app, AVAILABLE_TOOLS, TOOL_DEFINITIONS)
     logger.info("RAG module integrated with server")
     
-    logger.info("Server ready to accept connections")
-    logger.info("=" * 50)
-
     # Integrate timers and reminders with the server
     integrate_timer_reminder_tools(app, AVAILABLE_TOOLS, TOOL_DEFINITIONS)
     logger.info("Timer and reminder module integrated with server")
@@ -335,7 +337,7 @@ async def startup_event():
 async def list_conversations(limit: int = 20, offset: int = 0):
     """List all conversations"""
     try:
-        conversations = redis_client.list_conversations(limit=limit, offset=offset)
+        conversations = message_store.list_conversations(limit=limit, offset=offset)
         return {"conversations": conversations}
     except Exception as e:
         logger.error(f"Error listing conversations: {e}")
@@ -345,7 +347,7 @@ async def list_conversations(limit: int = 20, offset: int = 0):
 async def get_conversation(conversation_id: str):
     try:
         # Use the client's get_messages_by_conversation method
-        messages = redis_client.get_messages_by_conversation(conversation_id)
+        messages = message_store.get_messages_by_conversation(conversation_id)
         return {"conversation_id": conversation_id, "messages": messages}
     except Exception as e:
         logger.error(f"Error retrieving conversation: {str(e)}")
@@ -356,7 +358,7 @@ async def update_conversation(conversation_id: str, data: dict = Body(...)):
     """Update conversation metadata"""
     try:
         if "title" in data:
-            success = redis_client.update_conversation_title(conversation_id, data["title"])
+            success = message_store.update_conversation_title(conversation_id, data["title"])
             if success:
                 return {"status": "updated", "conversation_id": conversation_id}
             else:
@@ -371,7 +373,7 @@ async def update_conversation(conversation_id: str, data: dict = Body(...)):
 async def delete_conversation(conversation_id: str):
     """Delete a conversation and all its messages"""
     try:
-        success = redis_client.delete_conversation(conversation_id)
+        success = message_store.delete_conversation(conversation_id)
         if success:
             return {"status": "deleted", "conversation_id": conversation_id}
         else:
@@ -384,7 +386,7 @@ async def delete_conversation(conversation_id: str):
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str):
     try:
-        messages = redis_client.get_messages_by_conversation(conversation_id)
+        messages = message_store.get_messages_by_conversation(conversation_id)
         return {"conversation_id": conversation_id, "messages": messages}
     except Exception as e:
         logger.error(f"Error retrieving conversation: {str(e)}")
@@ -408,7 +410,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail}
-    )@app.get("/")
+    )
 
 @app.post("/v1/memory/search")
 async def search_memories(request: dict = Body(...)):
@@ -423,7 +425,7 @@ async def search_memories(request: dict = Body(...)):
     embedding = text_to_embedding_ollama(query)['embeddings']
     
     # Search
-    results = redis_client.vector_search(embedding, k=limit)
+    results = message_store.vector_search(embedding, k=limit)
     
     return {"memories": results}
 
@@ -464,7 +466,7 @@ def get_recent_conversations(days=7, limit=5):
     start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
     
     query = f"@conversation_id:summary-* @date:[{start_date} +inf]"
-    results = redis_client.redis_client.ft("message_idx").search(
+    results = message_store.message_store.ft("message_idx").search(
         query,
         sort_by="date",
         sortby_desc=True,
@@ -509,7 +511,7 @@ def update_user_profile(user_id, conversation_id):
                 json.dump(note_data, f, indent=2)
         
         # Get messages using the client's built-in method
-        messages = redis_client.get_messages_by_conversation(conversation_id)
+        messages = message_store.get_messages_by_conversation(conversation_id)
         
         logger.info(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
         
@@ -852,7 +854,7 @@ async def summarize_buffer_and_update_profile(conversation_id):
             today = datetime.now()
             summary_id = f"summary-segment-{conversation_id}-{today.strftime('%Y%m%d%H%M%S')}"
             
-            redis_client.store_message(
+            message_store.store_message(
                 role='system',
                 content=summary,
                 conversation_id=summary_id,
@@ -871,7 +873,7 @@ async def summarize_buffer_and_update_profile(conversation_id):
 
 async def maybe_summarize_conversation(conversation_id):
     """Summarize only if the conversation is substantial"""
-    messages = redis_client.get_messages_by_conversation(conversation_id)
+    messages = message_store.get_messages_by_conversation(conversation_id)
     if len(messages) >= 10:  # Only summarize conversations with 10+ messages
         return await summarize_conversation(conversation_id)
     return None
@@ -948,7 +950,7 @@ def create_note(title: str, content: str, tags: Optional[List[str]] = None) -> D
 async def summarize_conversation(conversation_id):
     """Summarize a conversation and store it as a higher-level memory"""
     # Get all messages for this conversation
-    messages = redis_client.get_messages_by_conversation(conversation_id)
+    messages = message_store.get_messages_by_conversation(conversation_id)
     
     # Format the conversation for summarization
     formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
@@ -969,7 +971,7 @@ async def summarize_conversation(conversation_id):
         
         # Store this summary with a special tag for easier retrieval
         today = datetime.now()
-        redis_client.store_message(
+        message_store.store_message(
             role='system',
             content=summary,
             conversation_id=f"summary-{conversation_id}",
@@ -1123,15 +1125,15 @@ async def retrieve_relevant_memories(user_query, conversation_id=None, k=5):
         query_embedding = text_to_embedding_ollama(user_query)
         
         # Check if vector_search method exists
-        if hasattr(redis_client, 'vector_search'):
+        if hasattr(message_store, 'vector_search'):
             # Search for similar past messages
-            similar_messages = redis_client.vector_search(query_embedding['embeddings'], k=k+5)  # Get more than needed to allow for filtering
+            similar_messages = message_store.vector_search(query_embedding['embeddings'], k=k+5)  # Get more than needed to allow for filtering
             
             # Filter out messages from the current conversation if provided
             filtered_messages = []
             if conversation_id:
                 # Get the current conversation messages
-                current_convo_messages = redis_client.get_messages_by_conversation(conversation_id)
+                current_convo_messages = message_store.get_messages_by_conversation(conversation_id)
                 
                 # Extract content from current conversation to compare
                 current_convo_contents = set()
@@ -1413,20 +1415,20 @@ def get_message_by_key(self, key):
                 return None
                 
         # Check what type the key is
-        key_type = self.redis_client.type(key)
+        key_type = self.message_store.type(key)
         
         if key_type == "ReJSON-RL":
             # It's a JSON object
-            data = self.redis_client.json().get(key)
+            data = self.message_store.json().get(key)
             return data
         elif key_type == "hash":
             # It's a hash - get all fields
-            data = self.redis_client.hgetall(key)
+            data = self.message_store.hgetall(key)
             return data
         elif key_type == "string":
             # It's a string - try to parse as JSON
             try:
-                raw_data = self.redis_client.get(key)
+                raw_data = self.message_store.get(key)
                 if isinstance(raw_data, bytes):
                     raw_data = raw_data.decode('utf-8')
                 return json.loads(raw_data)
@@ -1464,7 +1466,7 @@ def text_to_embedding_ollama(text):
 
 def query_vector_database(query_vectors, k=3):
     try:
-        results = redis_client.vector_search(query_vectors, k=k)
+        results = message_store.vector_search(query_vectors, k=k)
         # Extract content from results
         content_list = [item.get('content', '') for item in results if item.get('content')]
         return content_list
@@ -1484,7 +1486,7 @@ def embed_and_save(content, conversation_id, role="assistant"):
         
         if embedding:
             # Store in Redis
-            message_id = redis_client.store_message(
+            message_id = message_store.store_message(
                 role=role,
                 content=content,
                 conversation_id=conversation_id,
@@ -1746,7 +1748,7 @@ def manage_conversation_window(conversation_id, max_history=10):
     """
     try:
         # Get all messages for this conversation
-        all_messages = redis_client.get_messages_by_conversation(conversation_id)
+        all_messages = message_store.get_messages_by_conversation(conversation_id)
         
         # If we have more messages than our max_history, truncate
         if len(all_messages) > max_history:
@@ -1911,14 +1913,14 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
     if not latest_user_message:
         raise HTTPException(status_code=400, detail="No user message found in request")
     
-    # Store the latest user message in Redis
+    # Store the latest user message
     try:
         msg_content = latest_user_message['content']
         embeddings = text_to_embedding_ollama(msg_content)
         embedding = embeddings['embeddings']
         
-        # Store in Redis
-        redis_client.store_message(
+        # Store using the message store
+        message_store.store_message(
             role='user',
             content=msg_content,
             conversation_id=conversation_id,
@@ -1943,14 +1945,15 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
                 conversation_id=conversation_id
             )
         
-        # Write to file
+        # Write to file (if needed)
         write_to_file('User', msg_content, formatted_date)
     except Exception as e:
         logger.error(f"Error storing user message: {str(e)}")
         logger.exception(e)
     
-    # Get conversation history (last 10 messages)
-    conversation_history = manage_conversation_window(conversation_id, max_history=10)
+    # Get conversation history (last 10 messages) - USING MESSAGE STORE INSTEAD OF REDIS
+    conversation_history = message_store.get_messages_by_conversation(conversation_id, limit=10)
+    
     
     # Prepare messages for the AI with system prompt and conversation history
     messages = []
@@ -2190,7 +2193,7 @@ async def receive_chat_message(data: dict = Body(...), background_tasks: Backgro
         embedding = embeddings['embeddings']
         
         # Store in Redis
-        redis_client.store_message(
+        message_store.store_message(
             role='user',
             content=msg_content,
             conversation_id=conversation_id,
@@ -2305,14 +2308,14 @@ async def debug_messages(conversation_id: str):
     """Debug endpoint to check message retrieval for a conversation"""
     try:
         # Try direct key listing first
-        direct_keys = redis_client.redis_client.keys(f"message:{conversation_id}:*")
+        direct_keys = message_store.message_store.keys(f"message:{conversation_id}:*")
         
         # Try to get a sample of raw data
         sample_data = []
         for key in direct_keys[:3]:  # Just look at first 3 keys
             try:
                 # Get the raw data
-                raw_json = redis_client.redis_client.json().get(key)
+                raw_json = message_store.message_store.json().get(key)
                 sample_data.append({
                     "key": key,
                     "data": raw_json
@@ -2326,7 +2329,7 @@ async def debug_messages(conversation_id: str):
         # Try normal retrieval
         messages = []
         try:
-            messages = redis_client.get_messages_by_conversation(conversation_id)
+            messages = message_store.get_messages_by_conversation(conversation_id)
         except Exception as e:
             return {
                 "status": "error",
@@ -2357,7 +2360,7 @@ async def health_check():
     logger.info("Health check endpoint called")
     
     # Check Redis connection
-    redis_status = "connected" if redis_client.ping() else "disconnected"
+    redis_status = "connected" if message_store.ping() else "disconnected"
     
     return {
         "status": "healthy",

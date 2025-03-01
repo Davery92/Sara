@@ -15,7 +15,8 @@ import traceback
 from datetime import datetime
 
 # Import the RAG module
-from .rag_module import RAGManager
+
+from .neo4j_rag_integration import Neo4jRAGManager, get_neo4j_rag_manager
 
 # Setup logging
 logger = logging.getLogger("rag-api")
@@ -41,10 +42,9 @@ class DocumentMetadata(BaseModel):
 def get_rag_manager():
     global rag_manager
     if rag_manager is None:
-        # Import the Redis client here to avoid circular imports
-        from .redis_client import RedisClient
-        redis_client = RedisClient(host='localhost', port=6379, db=0)
-        rag_manager = RAGManager(redis_client)
+        # Import the Neo4j RAG manager instead of Redis client
+        from .neo4j_rag_integration import get_neo4j_rag_manager
+        rag_manager = get_neo4j_rag_manager()
     return rag_manager
 
 
