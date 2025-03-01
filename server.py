@@ -13,7 +13,7 @@ from datetime import date, datetime
 import logging
 import sys
 from modules.perplexica_module import PerplexicaClient
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import logging
 import redis
 import json
@@ -32,8 +32,7 @@ from modules.rag_api import rag_router  # Import this first
 from modules.rag_web_interface import integrate_web_interface
 from modules.rag_integration import integrate_rag_with_server, update_system_prompt_with_rag_info
 from fastapi.middleware.cors import CORSMiddleware
-
-
+from modules.timer_reminder_integration import integrate_timer_reminder_tools
 
 
 
@@ -159,6 +158,14 @@ class RedisClient:
         """Store a message with its metadata and embedding"""
         message_id = f"message:{conversation_id}:{role}:{int(date.timestamp())}"
         
+        # Ensure content is a string
+        if not isinstance(content, str):
+            try:
+                content = str(content)
+            except Exception as e:
+                logger.error(f"Failed to convert content to string: {str(e)}")
+                content = "Error: Could not convert content to string"
+        
         message_data = {
             "role": role,
             "content": content,
@@ -167,37 +174,87 @@ class RedisClient:
             "timestamp": int(date.timestamp())
         }
         
-        # If embedding is provided, convert to bytes and store
-        if embedding is not None:
-            embedding_bytes = np.array(embedding, dtype=np.float32).tobytes()
-            # Store main data as JSON
+        # Store the main message data first
+        try:
             self.redis_client.json().set(message_id, '$', message_data)
-            # Store embedding separately due to binary format
-            self.redis_binary.hset(message_id, "embedding", embedding_bytes)
-        else:
-            # Store without embedding
-            self.redis_client.json().set(message_id, '$', message_data)
+            
+            # If embedding is provided, store it separately
+            if embedding is not None:
+                try:
+                    # Store embedding in a separate key
+                    embedding_key = f"{message_id}:embedding"
+                    embedding_bytes = np.array(embedding, dtype=np.float32).tobytes()
+                    self.redis_binary.set(embedding_key, embedding_bytes)
+                except Exception as e:
+                    logger.error(f"Error storing embedding for message {message_id}: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error storing message {message_id}: {str(e)}")
         
         return message_id
     
     def get_messages_by_conversation(self, conversation_id, limit=100):
         """Retrieve all messages for a specific conversation, ordered by timestamp"""
-        query = f"@conversation_id:{conversation_id}"
-        results = self.redis_client.ft("message_idx").search(
-            query,
-            sort_by="timestamp",
-            limit=0, limit_num=limit
-        )
-        
-        messages = []
-        for doc in results.docs:
-            message = json.loads(doc.json)
-            messages.append({
-                "role": message["role"],
-                "content": message["content"]
-            })
-        
-        return messages
+        try:
+            # Get all message keys for this conversation
+            raw_keys = self.redis_client.keys(f"message:{conversation_id}:*")
+            
+            # Filter out embedding keys
+            message_keys = []
+            for key in raw_keys:
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                # Skip embedding keys
+                if not key_str.endswith(":embedding"):
+                    message_keys.append(key_str)
+            
+            if not message_keys:
+                return []
+            
+            messages = []
+            for key in message_keys:
+                try:
+                    # Try to get JSON data safely
+                    try:
+                        json_data = self.redis_client.json().get(key)
+                        
+                        if json_data and isinstance(json_data, dict):
+                            # Extract just the data we need
+                            messages.append({
+                                "role": json_data.get("role", "unknown"),
+                                "content": json_data.get("content", ""),
+                                "timestamp": json_data.get("timestamp", 0)
+                            })
+                    except Exception as json_err:
+                        logger.warning(f"Error getting JSON for key {key}: {json_err}")
+                        # Try alternative retrieval method
+                        try:
+                            raw_data = self.redis_client.get(key)
+                            if raw_data and isinstance(raw_data, bytes):
+                                try:
+                                    # Try to decode and parse as JSON
+                                    json_str = raw_data.decode('utf-8')
+                                    json_data = json.loads(json_str)
+                                    messages.append({
+                                        "role": json_data.get("role", "unknown"),
+                                        "content": json_data.get("content", ""),
+                                        "timestamp": json_data.get("timestamp", 0)
+                                    })
+                                except (UnicodeDecodeError, json.JSONDecodeError):
+                                    # Not valid UTF-8 or JSON, skip this
+                                    continue
+                        except Exception:
+                            # Skip this message
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error processing message for key {key}: {e}")
+                    continue
+            
+            # Sort messages by timestamp
+            messages.sort(key=lambda x: x.get("timestamp", 0))
+            
+            return messages
+        except Exception as e:
+            logger.error(f"Error retrieving messages: {str(e)}")
+            return []
     
     def vector_search(self, embedding, k=3):
         """Find similar messages based on vector similarity"""
@@ -267,6 +324,13 @@ async def startup_event():
     logger.info("Server ready to accept connections")
     logger.info("=" * 50)
 
+    # Integrate timers and reminders with the server
+    integrate_timer_reminder_tools(app, AVAILABLE_TOOLS, TOOL_DEFINITIONS)
+    logger.info("Timer and reminder module integrated with server")
+    
+    logger.info("Server ready to accept connections")
+    logger.info("=" * 50)
+
 @app.get("/v1/conversations")
 async def list_conversations(limit: int = 20, offset: int = 0):
     """List all conversations"""
@@ -279,13 +343,13 @@ async def list_conversations(limit: int = 20, offset: int = 0):
 
 @app.get("/v1/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str):
-    """Get a specific conversation by ID"""
     try:
+        # Use the client's get_messages_by_conversation method
         messages = redis_client.get_messages_by_conversation(conversation_id)
         return {"conversation_id": conversation_id, "messages": messages}
     except Exception as e:
-        logger.error(f"Error retrieving conversation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error retrieving conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving conversation: {str(e)}")
 
 @app.put("/v1/conversations/{conversation_id}")
 async def update_conversation(conversation_id: str, data: dict = Body(...)):
@@ -371,7 +435,7 @@ async def get_recent_memories(days: int = 7, limit: int = 5):
 @app.get("/v1/memory/profile/{user_id}")
 async def get_user_profile(user_id: str):
     """Get the user profile information"""
-    profile = read_note(f"user_profile_{user_id}")
+    profile = read_note(f"user_profile")
     if "error" in profile:
         return {"profile": "No profile information available"}
     return {"profile": profile}
@@ -419,45 +483,84 @@ def get_recent_conversations(days=7, limit=5):
 
 def update_user_profile(user_id, conversation_id):
     """Update user profile based on conversation"""
-    # Get conversation messages
-    messages = redis_client.get_messages_by_conversation(conversation_id)
-    
-    # Prepare prompt to extract user information
-    extract_prompt = "Based on this conversation, what new information did we learn about the user? List any preferences, interests, or personal details mentioned."
-    
-    # Format conversation for the model
-    formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
-    
-    # Make model request
-    extract_messages = [
-        {'role': 'system', 'content': extract_prompt},
-        {'role': 'user', 'content': formatted_convo}
-    ]
-    
-    # Get extraction
-    response = asyncio.run(fetch_ollama_response(extract_messages, "llama3.1", stream=False))
-    if 'message' in response and 'content' in response['message']:
-        new_info = response['message']['content']
+    try:
+        # Use a consistent identifier for the user profile
+        profile_id = "user_profile"
+        profile_file_path = os.path.join(NOTES_DIRECTORY, "user_profile.json")
         
-        # Store in a user profile note
-        profile_note = read_note(f"user_profile_{user_id}")
-        if "error" in profile_note:
-            # Create new profile
-            create_note(
-                title=f"User Profile: {user_id}",
-                content=new_info,
-                tags=["user_profile", user_id]
-            )
-        else:
-            # Append to existing profile
-            append_note(
-                identifier=f"user_profile_{user_id}",
-                content=f"\nUpdated {datetime.now().strftime('%Y-%m-%d')}:\n{new_info}"
-            )
+        # Check if profile exists, create if not
+        if not os.path.exists(profile_file_path):
+            # Create the user profile file directly with a fixed filename
+            logger.info("Creating new user profile")
+            
+            # Create note data
+            now = datetime.now().isoformat()
+            note_data = {
+                "title": "User Profile",
+                "content": "Initial user profile.",
+                "tags": ["user_profile"],
+                "created": now,
+                "last_modified": now,
+                "filename": "user_profile.json"
+            }
+            
+            # Write directly to the specified path
+            with open(profile_file_path, 'w') as f:
+                json.dump(note_data, f, indent=2)
         
-        return new_info
-    return None
-
+        # Get messages using the client's built-in method
+        messages = redis_client.get_messages_by_conversation(conversation_id)
+        
+        logger.info(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
+        
+        # Filter to get only user messages
+        user_messages = [msg for msg in messages if msg.get('role') == 'user']
+        logger.info(f"Found {len(user_messages)} user messages from {len(messages)} total messages")
+        
+        # Skip if fewer than required messages
+        if len(user_messages) < 3:  # Changed from 15 to 3 for testing
+            logger.info(f"Not enough messages in current conversation: Only {len(user_messages)} user messages")
+            return None
+            
+        # Prepare prompt to extract user information
+        extract_prompt = "Based on this conversation, what new information did we learn about the user? List any preferences, interests, or personal details mentioned."
+        
+        # Format conversation for the model
+        formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+        
+        # Make model request
+        extract_messages = [
+            {'role': 'system', 'content': extract_prompt},
+            {'role': 'user', 'content': formatted_convo}
+        ]
+        
+        # Get extraction
+        try:
+            response = asyncio.run(fetch_ollama_response(extract_messages, "llama3.1", stream=False))
+            if 'message' in response and 'content' in response['message']:
+                new_info = response['message']['content']
+                
+                # Read the current profile
+                with open(profile_file_path, 'r') as f:
+                    profile_data = json.load(f)
+                
+                # Update content
+                profile_data['content'] += f"\nUpdated {datetime.now().strftime('%Y-%m-%d')}:\n{new_info}"
+                profile_data['last_modified'] = datetime.now().isoformat()
+                
+                # Write updated profile
+                with open(profile_file_path, 'w') as f:
+                    json.dump(profile_data, f, indent=2)
+                
+                logger.info("Updated user profile with new information")
+                return new_info
+        except Exception as e:
+            logger.error(f"Error in profile extraction: {str(e)}")
+            
+        return None
+    except Exception as e:
+        logger.error(f"Error updating user profile: {str(e)}")
+        return None
 
 def load_system_prompt():
     """Load the system prompt from a file"""
@@ -611,6 +714,160 @@ def get_core_memory_stats() -> Dict[str, Any]:
             "total_chars": 0,
             "sample": []
         }
+
+class ConversationBuffer:
+    def __init__(self, max_buffer_size=10):
+        self.buffer = {}  # Dictionary of conversation_id -> list of messages
+        self.max_buffer_size = max_buffer_size
+        self.summarization_tasks = set()  # Track ongoing summarization tasks
+    
+    def add_message(self, conversation_id, message):
+        """Add a message to the buffer for a specific conversation"""
+        if conversation_id not in self.buffer:
+            self.buffer[conversation_id] = []
+        
+        self.buffer[conversation_id].append(message)
+        
+        # Check if we need to summarize
+        if len(self.buffer[conversation_id]) >= self.max_buffer_size:
+            return True
+        return False
+    
+    def get_messages(self, conversation_id):
+        """Get all messages in the buffer for a conversation"""
+        return self.buffer.get(conversation_id, [])
+    
+    def clear_buffer(self, conversation_id):
+        """Clear the buffer for a conversation after summarization"""
+        if conversation_id in self.buffer:
+            self.buffer[conversation_id] = []
+    
+    def is_summarization_in_progress(self, conversation_id):
+        """Check if summarization is already in progress"""
+        return conversation_id in self.summarization_tasks
+    
+    def mark_summarization_started(self, conversation_id):
+        """Mark that summarization has started for this conversation"""
+        self.summarization_tasks.add(conversation_id)
+    
+    def mark_summarization_completed(self, conversation_id):
+        """Mark that summarization has completed for this conversation"""
+        if conversation_id in self.summarization_tasks:
+            self.summarization_tasks.remove(conversation_id)
+
+
+# Initialize the conversation buffer
+conversation_buffer = ConversationBuffer(max_buffer_size=10)
+
+async def summarize_buffer_and_update_profile(conversation_id):
+    """
+    Summarize the conversation buffer and update the user profile
+    This function should be called as a background task
+    """
+    # Skip if summarization is already in progress for this conversation
+    if conversation_buffer.is_summarization_in_progress(conversation_id):
+        logger.info(f"Summarization already in progress for conversation {conversation_id}")
+        return
+    
+    # Mark summarization as started
+    conversation_buffer.mark_summarization_started(conversation_id)
+    
+    try:
+        # Get messages from buffer
+        buffer_messages = conversation_buffer.get_messages(conversation_id)
+        
+        if not buffer_messages or len(buffer_messages) < 3:  # Minimum threshold for summarization
+            logger.info(f"Not enough messages in buffer for summarization: {len(buffer_messages)}")
+            conversation_buffer.mark_summarization_completed(conversation_id)
+            return
+        
+        logger.info(f"Summarizing buffer with {len(buffer_messages)} messages for conversation {conversation_id}")
+        
+        # Format conversation for the model
+        formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in buffer_messages])
+        
+        # Create a prompt specific to user profile extraction
+        extract_prompt = """
+        Based on this conversation segment, extract key information about the user such as:
+        1. Preferences and interests
+        2. Personal details they've shared
+        3. Opinions or values they've expressed
+        4. Any other relevant information for building a user profile
+        
+        Provide this information in a structured list format that could be added to a user profile.
+        Focus only on new information, not what was already known.
+        """
+        
+        # Make model request for extraction
+        extract_messages = [
+            {'role': 'system', 'content': extract_prompt},
+            {'role': 'user', 'content': formatted_convo}
+        ]
+        
+        # Get extraction using non-streaming request
+        response = await fetch_ollama_response(extract_messages, "llama3.1", stream=False)
+        
+        if 'message' in response and 'content' in response['message']:
+            new_info = response['message']['content']
+            
+            # Check if new information was extracted
+            if "no new information" in new_info.lower() or "not enough information" in new_info.lower():
+                logger.info(f"No new user information extracted from conversation {conversation_id}")
+            else:
+                # Update the single user profile in the notes directory
+                profile_id = "user_profile"
+                existing_profile = read_note(profile_id)
+                
+                if "error" in existing_profile:
+                    # Create new profile if it doesn't exist
+                    logger.info("Creating new user profile")
+                    create_note(
+                        title="User Profile",
+                        content=f"# User Profile\nCreated: {datetime.now().strftime('%Y-%m-%d')}\n\n{new_info}",
+                        tags=["user_profile"]
+                    )
+                else:
+                    # Append to existing profile
+                    logger.info("Updating user profile")
+                    append_note(
+                        profile_id,
+                        f"\n\n## Updated {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{new_info}"
+                    )
+                
+                logger.info("User profile updated with new information")
+        
+        # Also generate a summary of this conversation segment
+        summary_prompt = "Summarize the key points of this conversation segment in 2-3 sentences."
+        summary_messages = [
+            {'role': 'system', 'content': summary_prompt},
+            {'role': 'user', 'content': formatted_convo}
+        ]
+        
+        summary_response = await fetch_ollama_response(summary_messages, "llama3.1", stream=False)
+        
+        if 'message' in summary_response and 'content' in summary_response['message']:
+            summary = summary_response['message']['content']
+            
+            # Store this summary with a special tag
+            today = datetime.now()
+            summary_id = f"summary-segment-{conversation_id}-{today.strftime('%Y%m%d%H%M%S')}"
+            
+            redis_client.store_message(
+                role='system',
+                content=summary,
+                conversation_id=summary_id,
+                date=today,
+                embedding=text_to_embedding_ollama(summary)['embeddings']
+            )
+            
+            logger.info(f"Stored segment summary: {summary_id}")
+    except Exception as e:
+        logger.error(f"Error in summarization process: {str(e)}")
+        logger.exception(e)
+    finally:
+        # Clear the buffer and mark summarization as completed
+        conversation_buffer.clear_buffer(conversation_id)
+        conversation_buffer.mark_summarization_completed(conversation_id)
 
 async def maybe_summarize_conversation(conversation_id):
     """Summarize only if the conversation is substantial"""
@@ -859,30 +1116,72 @@ async def log_requests(request: Request, call_next):
         logger.error(f"Request failed: {method} {url} - Error: {str(e)}")
         raise
 
-async def retrieve_relevant_memories(user_query, k=5):
-    """Retrieve relevant past conversations based on the user query"""
-    # Get embedding for the current query
-    query_embedding = text_to_embedding_ollama(user_query)
-    
-    # Search for similar past messages
-    similar_messages = redis_client.vector_search(query_embedding['embeddings'], k=k)
-    
-    # Format into conversational context
-    if similar_messages:
-        memory_context = "Relevant past conversations:\n\n"
-        for i, msg in enumerate(similar_messages):
-            memory_context += f"Memory {i+1}:\n"
-            memory_context += f"Role: {msg['role']}\n"
-            memory_context += f"Content: {msg['content']}\n\n"
-        return memory_context
-    return ""
+async def retrieve_relevant_memories(user_query, conversation_id=None, k=5):
+    """Retrieve relevant past conversations based on the user query, excluding recent messages from current conversation"""
+    try:
+        # Get embedding for the current query
+        query_embedding = text_to_embedding_ollama(user_query)
+        
+        # Check if vector_search method exists
+        if hasattr(redis_client, 'vector_search'):
+            # Search for similar past messages
+            similar_messages = redis_client.vector_search(query_embedding['embeddings'], k=k+5)  # Get more than needed to allow for filtering
+            
+            # Filter out messages from the current conversation if provided
+            filtered_messages = []
+            if conversation_id:
+                # Get the current conversation messages
+                current_convo_messages = redis_client.get_messages_by_conversation(conversation_id)
+                
+                # Extract content from current conversation to compare
+                current_convo_contents = set()
+                for msg in current_convo_messages:
+                    content = msg.get('content', '')
+                    if content:
+                        # Add a simplified version of content for comparison (first 100 chars)
+                        current_convo_contents.add(content[:100].lower().strip())
+                
+                # Filter out messages that are part of the current conversation
+                for msg in similar_messages:
+                    content = msg.get('content', '')
+                    # Skip if content is empty
+                    if not content:
+                        continue
+                        
+                    # Check if this content appears to match anything in the current conversation
+                    simplified_content = content[:100].lower().strip()
+                    if simplified_content not in current_convo_contents:
+                        filtered_messages.append(msg)
+                    
+                    # Break if we have enough filtered messages
+                    if len(filtered_messages) >= k:
+                        break
+            else:
+                # No conversation ID provided, use all results
+                filtered_messages = similar_messages[:k]
+            
+            # Format into conversational context
+            if filtered_messages:
+                memory_context = "Relevant past conversations:\n\n"
+                for i, msg in enumerate(filtered_messages):
+                    memory_context += f"Memory {i+1}:\n"
+                    memory_context += f"Role: {msg.get('role', 'unknown')}\n"
+                    memory_context += f"Content: {msg.get('content', '')}\n\n"
+                return memory_context
+        else:
+            logger.warning("vector_search method not available in RedisClient")
+        
+        return ""
+    except Exception as e:
+        logger.error(f"Error retrieving relevant memories: {str(e)}")
+        return ""
 
 
 
 # Define tool functions
-def send_message(message: str, user_id: str = "default") -> str:
+def send_message(message: str, user: str = "default") -> str:
     """Send a message to a user"""
-    print(f"\nSending message to user {user_id}: {message}")
+    print(f"\nSending message to user {user}: {message}")
     return message
 
 def search_perplexica(query: str, focus_mode: str = "webSearch", optimization_mode: str = "balanced") -> str:
@@ -913,7 +1212,7 @@ AVAILABLE_TOOLS: Dict[str, Callable] = {
 
 # Define tool schemas that match OpenAI's format
 TOOL_DEFINITIONS = [
-    {
+        {
         'type': 'function',
         'function': {
             'name': 'send_message',
@@ -926,7 +1225,7 @@ TOOL_DEFINITIONS = [
                         'type': 'string', 
                         'description': 'Your thinking process about how to respond to the user'
                     },
-                    'user_id': {
+                    'user': {
                         'type': 'string',
                         'description': 'The ID of the user to send the message to (optional)',
                         'default': 'default'
@@ -1102,6 +1401,50 @@ TOOL_DEFINITIONS = [
 # Conversation history
 current_chat = []
 
+def get_message_by_key(self, key):
+    """Retrieve a message by key, handling different Redis data types"""
+    try:
+        # Check if key is bytes and decode if needed
+        if isinstance(key, bytes):
+            try:
+                key = key.decode('utf-8')
+            except UnicodeDecodeError:
+                logger.warning(f"Could not decode key: {key}")
+                return None
+                
+        # Check what type the key is
+        key_type = self.redis_client.type(key)
+        
+        if key_type == "ReJSON-RL":
+            # It's a JSON object
+            data = self.redis_client.json().get(key)
+            return data
+        elif key_type == "hash":
+            # It's a hash - get all fields
+            data = self.redis_client.hgetall(key)
+            return data
+        elif key_type == "string":
+            # It's a string - try to parse as JSON
+            try:
+                raw_data = self.redis_client.get(key)
+                if isinstance(raw_data, bytes):
+                    raw_data = raw_data.decode('utf-8')
+                return json.loads(raw_data)
+            except:
+                # If can't parse as JSON, return as is
+                if isinstance(raw_data, bytes):
+                    try:
+                        raw_data = raw_data.decode('utf-8')
+                    except UnicodeDecodeError:
+                        # If it's binary data and can't be decoded, return a placeholder
+                        return {"content": "(binary data)", "role": "unknown"}
+                return {"content": raw_data, "role": "unknown"}
+        else:
+            return None
+    except Exception as e:
+        logger.warning(f"Error retrieving message {key}: {e}")
+        return None
+
 # File operations
 def write_to_file(role, content, dates):
     try:
@@ -1120,10 +1463,14 @@ def text_to_embedding_ollama(text):
     return response
 
 def query_vector_database(query_vectors, k=3):
-    results = redis_client.vector_search(query_vectors, k=k)
-    # Extract content from results
-    content_list = [item['content'] for item in results]
-    return content_list
+    try:
+        results = redis_client.vector_search(query_vectors, k=k)
+        # Extract content from results
+        content_list = [item.get('content', '') for item in results if item.get('content')]
+        return content_list
+    except Exception as e:
+        logger.error(f"Error in vector search: {str(e)}")
+        return []
 
 def embed_and_save(content, conversation_id, role="assistant"):
     if not content or not content.strip():
@@ -1136,7 +1483,7 @@ def embed_and_save(content, conversation_id, role="assistant"):
         embedding = embeddings.get('embeddings')
         
         if embedding:
-            # Store in Redis instead of ChromaDB
+            # Store in Redis
             message_id = redis_client.store_message(
                 role=role,
                 content=content,
@@ -1194,7 +1541,15 @@ async def process_tool_calls(response_data: dict) -> dict:
                     continue
             
             logger.info(f"Executing tool {function_name} with arguments: {arguments}")
-            result = function(**arguments)
+            
+            # Check if the function is a coroutine function (async)
+            if asyncio.iscoroutinefunction(function):
+                # If it's async, await it
+                result = await function(**arguments)
+            else:
+                # If it's not async, call it normally
+                result = function(**arguments)
+                
             logger.info(f"Tool {function_name} executed successfully")
             
             # Store the tool output with standard role/name format
@@ -1232,7 +1587,21 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
             # Always include default tools for consistent behavior
             logger.info(f"Adding default tools to streaming request")
             data['tools'] = TOOL_DEFINITIONS
-        
+        try:
+            # Pretty print the request data to see exactly what's being sent
+            import json
+            logger.info(f"JSON request data: {json.dumps(data, indent=2)}")
+            
+            # Make sure tools are properly serializable
+            json.dumps(data['tools'])  # This will raise an error if there's an issue
+        except Exception as e:
+            logger.error(f"Error in request data formatting: {str(e)}")
+            # You might want to still try the request, but with simpler tools
+            if 'tools' in data:
+                # Try with simplified tools if there's an error
+                data['tools'] = data['tools'][:3]  # Just use the first 3 tools as a test
+
+
         # Get the appropriate URL based on the model
         url = MODEL_URLS.get(local_model, MODEL_URLS["default"])
         
@@ -1362,6 +1731,34 @@ async def fetch_ollama_response(messages, model, tools=None):
             logger.error(error_msg)
             raise HTTPException(status_code=500, detail=error_msg)
 
+# Define a new function to manage the conversation window
+def manage_conversation_window(conversation_id, max_history=10):
+    """
+    Retrieve the last N messages from a conversation to use as context.
+    If there are more than max_history messages, oldest messages will be excluded.
+    
+    Args:
+        conversation_id: The ID of the conversation to retrieve
+        max_history: Maximum number of messages to include in the context window
+        
+    Returns:
+        List of messages in the conversation window
+    """
+    try:
+        # Get all messages for this conversation
+        all_messages = redis_client.get_messages_by_conversation(conversation_id)
+        
+        # If we have more messages than our max_history, truncate
+        if len(all_messages) > max_history:
+            logger.info(f"Truncating conversation history from {len(all_messages)} to {max_history} messages")
+            return all_messages[-max_history:]  # Keep only the most recent messages
+        else:
+            logger.info(f"Using full conversation history ({len(all_messages)} messages)")
+            return all_messages
+    except Exception as e:
+        logger.error(f"Error retrieving conversation window: {str(e)}")
+        return []
+
 # Format chunk as SSE message (Server-Sent Events)
 def format_sse_message(data):
     # Convert Ollama format to OpenAI format for streaming
@@ -1490,77 +1887,113 @@ class EmbeddingRequest(BaseModel):
 async def chat_completions(request: ChatCompletionRequest, background_tasks: BackgroundTasks):
     global current_chat
     
-    # Generate a unique ID for this conversation
-    conversation_id = str(uuid4())
-    today = datetime.now()
-    formatted_date = today.strftime("%m-%d-%Y")
-    
     # Process the request
-    messages = request.messages.copy()  # Create a copy to avoid modifying the original
+    client_messages = request.messages.copy()  # Create a copy to avoid modifying the original
     model = request.model
     stream = request.stream
     tools = request.tools or TOOL_DEFINITIONS  # Always use tools
-    background_tasks.add_task(maybe_summarize_conversation, conversation_id)
-    background_tasks.add_task(update_user_profile, request.user or "default_user", conversation_id)
-    logger.info(f"Chat completion request: model={model}, stream={stream}, with {len(messages)} messages")
     
-    # Remove any existing system prompts
-    messages = [msg for msg in messages if msg['role'] != 'system']
+    # Get conversation ID from user field if provided, otherwise generate new
+    conversation_id = request.user if request.user and request.user.startswith("conv_") else f"conv_{str(uuid4())}"
     
-    # Always add our system prompt from the file as the first message
+    today = datetime.now()
+    formatted_date = today.strftime("%m-%d-%Y")
+    
+    logger.info(f"Chat completion request: model={model}, stream={stream}, conversation_id={conversation_id}")
+    
+    # Extract the latest user message from the client's messages
+    latest_user_message = None
+    for msg in reversed(client_messages):
+        if msg['role'] == 'user':
+            latest_user_message = msg
+            break
+    
+    if not latest_user_message:
+        raise HTTPException(status_code=400, detail="No user message found in request")
+    
+    # Store the latest user message in Redis
+    try:
+        msg_content = latest_user_message['content']
+        embeddings = text_to_embedding_ollama(msg_content)
+        embedding = embeddings['embeddings']
+        
+        # Store in Redis
+        redis_client.store_message(
+            role='user',
+            content=msg_content,
+            conversation_id=conversation_id,
+            date=today,
+            embedding=embedding
+        )
+        
+        # Add to conversation buffer
+        need_summarization = conversation_buffer.add_message(
+            conversation_id=conversation_id,
+            message={
+                'role': 'user',
+                'content': msg_content,
+                'timestamp': today.timestamp()
+            }
+        )
+        
+        # If buffer is full, schedule summarization
+        if need_summarization:
+            background_tasks.add_task(
+                summarize_buffer_and_update_profile,
+                conversation_id=conversation_id
+            )
+        
+        # Write to file
+        write_to_file('User', msg_content, formatted_date)
+    except Exception as e:
+        logger.error(f"Error storing user message: {str(e)}")
+        logger.exception(e)
+    
+    # Get conversation history (last 10 messages)
+    conversation_history = manage_conversation_window(conversation_id, max_history=10)
+    
+    # Prepare messages for the AI with system prompt and conversation history
+    messages = []
+    
+    # Add system prompt
     current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Add system prompt with current date/time
-    system_prompt_with_datetime = f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}"
+    # Get user profile
+    user_profile = read_note("user_profile")
+    user_profile_content = ""
+    if "error" not in user_profile:
+        user_profile_content = f"\n\nUser Profile:\n{user_profile.get('content', '')}"
+        logger.info(f"Adding user profile ({len(user_profile_content)} chars) to system prompt")
     
-    # Always add our system prompt from the file as the first message
-    messages.insert(0, {'role': 'system', 'content': system_prompt_with_datetime})
+    # Add system prompt with current date/time and user profile
+    system_prompt_with_context = f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}{user_profile_content}"
+    messages.append({'role': 'system', 'content': system_prompt_with_context})
     
-    user_message = next((msg for msg in request.messages if msg['role'] == 'user'), None)
-    if user_message:
-        memory_context = await retrieve_relevant_memories(user_message['content'])
-        if memory_context:
-            # Add memory context right after the system prompt
-            memory_system_message = {
-                'role': 'system',
-                'content': f"The following are relevant memories from past conversations that may help with this request:\n\n{memory_context}\n\nUse these memories if they're relevant to the current conversation."
-            }
-            messages.insert(1, memory_system_message)
+    # Add memory context if available
+    memory_context = await retrieve_relevant_memories(latest_user_message['content'], conversation_id)
+    if memory_context:
+        memory_system_message = {
+            'role': 'system',
+            'content': f"The following are relevant memories from past conversations that may help with this request:\n\n{memory_context}\n\nUse these memories if they're relevant to the current conversation."
+        }
+        messages.append(memory_system_message)
+        logger.info(f"Added relevant memories to conversation context")
     
-    # Store the conversation
-    for message in messages:
-        if message['role'] == 'user':
-            # Process user message
-            try:
-                msg_content = message['content']
-                embeddings = text_to_embedding_ollama(msg_content)
-                embedding = embeddings['embeddings']
-                
-                # Store in Redis
-                redis_client.store_message(
-                    role='user',
-                    content=msg_content,
-                    conversation_id=conversation_id,
-                    date=today,
-                    embedding=embedding
-                )
-                
-                # Query for relevant context using Redis
-                context = query_vector_database(embedding)
-                
-                # Write to file
-                write_to_file('User', msg_content, formatted_date)
-            except Exception as e:
-                logger.error(f"Error processing user message: {str(e)}")
-                logger.exception(e)
+    # Add conversation history (converts Redis format to OpenAI message format)
+    for msg in conversation_history:
+        if 'role' in msg and 'content' in msg:
+            messages.append({
+                'role': msg['role'],
+                'content': msg['content']
+            })
+    
+    # Add background tasks
+    background_tasks.add_task(maybe_summarize_conversation, conversation_id)
     
     # Update current chat
     current_chat = messages.copy()
     
-    # Log the full conversation before sending to model
     logger.info(f"Sending conversation with {len(messages)} messages to model")
-    for i, msg in enumerate(messages):
-        logger.info(f"Message {i}: role={msg['role']}, content_length={len(msg.get('content', ''))}")
     
     # Process the completion request
     if stream:
@@ -1583,7 +2016,18 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
             # Save the complete response
             if full_response:
                 logger.info(f"Saving complete response ({len(full_response)} chars)")
-                await async_embed_and_save(full_response, f"assistant-{conversation_id}")
+                # Store assistant response in the same conversation
+                await async_embed_and_save(full_response, conversation_id)
+                
+                # Add assistant response to conversation buffer
+                conversation_buffer.add_message(
+                    conversation_id=conversation_id,
+                    message={
+                        'role': 'assistant',
+                        'content': full_response,
+                        'timestamp': datetime.now().timestamp()
+                    }
+                )
                 
         return StreamingResponse(
             stream_response(),
@@ -1619,13 +2063,23 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
                         assistant_content = follow_up_response['message']['content']
                         logger.info(f"Received follow-up response with {len(assistant_content)} chars")
             
-            # Save assistant response
+            # Save assistant response in the same conversation
             if assistant_content:
-                await async_embed_and_save(assistant_content, f"assistant-{conversation_id}")
+                await async_embed_and_save(assistant_content, conversation_id)
+                
+                # Add assistant response to conversation buffer
+                conversation_buffer.add_message(
+                    conversation_id=conversation_id,
+                    message={
+                        'role': 'assistant',
+                        'content': assistant_content,
+                        'timestamp': datetime.now().timestamp()
+                    }
+                )
             
             # Format response to match OpenAI's format
             openai_response = {
-                "id": f"chatcmpl-{conversation_id}",
+                "id": f"chatcmpl-{str(uuid4())}",
                 "object": "chat.completion",
                 "created": int(datetime.now().timestamp()),
                 "model": model,
@@ -1719,17 +2173,17 @@ async def list_models():
 
 # Backward compatibility with the original API
 @app.post("/api/chat")
-async def receive_chat_message(data: dict = Body(...)):
+async def receive_chat_message(data: dict = Body(...), background_tasks: BackgroundTasks = None):
     try:
-        conversation_id = str(uuid4())
+        # Extract conversation_id from data if provided, otherwise generate new
+        conversation_id = data.get("conversation_id", f"conv_{str(uuid4())}")
         today = datetime.now()
         formatted_date = today.strftime("%m-%d-%Y")
         message = data["message"]
         model = data["model"]
         msg_content = message["content"]
         
-        # Clear the current chat for a fresh conversation
-        current_chat.clear()
+        logger.info(f"Legacy chat API called with conversation_id={conversation_id}")
         
         # Get embeddings
         embeddings = text_to_embedding_ollama(msg_content)
@@ -1744,63 +2198,157 @@ async def receive_chat_message(data: dict = Body(...)):
             embedding=embedding
         )
         
-        # Query for similar messages
-        context_messages = query_vector_database(embedding)
+        # Add to conversation buffer
+        need_summarization = conversation_buffer.add_message(
+            conversation_id=conversation_id,
+            message={
+                'role': 'user',
+                'content': msg_content,
+                'timestamp': today.timestamp()
+            }
+        )
         
-        # Add system prompt
-        current_chat.append({'role': 'system', 'content': SYSTEM_PROMPT})
-        
-        # Add user message
-        current_chat.append(message)
+        # If buffer is full, schedule summarization
+        if need_summarization and background_tasks is not None:
+            background_tasks.add_task(
+                summarize_buffer_and_update_profile,
+                conversation_id=conversation_id
+            )
         
         # Write to file
         write_to_file('User', msg_content, formatted_date)
+        
+        # Get conversation history (last 10 messages)
+        conversation_history = manage_conversation_window(conversation_id, max_history=10)
+        
+        # Prepare messages for the model
+        messages = []
+        
+        # Get user profile
+        user_profile = read_note("user_profile")
+        user_profile_content = ""
+        if "error" not in user_profile:
+            user_profile_content = f"\n\nUser Profile:\n{user_profile.get('content', '')}"
+            logger.info(f"Adding user profile ({len(user_profile_content)} chars) to system prompt")
+        
+        # Add system prompt with user profile
+        system_prompt_with_context = f"{SYSTEM_PROMPT}{user_profile_content}"
+        messages.append({'role': 'system', 'content': system_prompt_with_context})
+        
+        # Add conversation history
+        for msg in conversation_history:
+            if 'role' in msg and 'content' in msg:
+                messages.append({
+                    'role': msg['role'],
+                    'content': msg['content']
+                })
+        
+        # Add memory context if available
+        memory_context = await retrieve_relevant_memories(msg_content, conversation_id)
+        if memory_context:
+            memory_system_message = {
+                'role': 'system',
+                'content': f"The following are relevant memories from past conversations that may help with this request:\n\n{memory_context}\n\nUse these memories if they're relevant to the current conversation."
+            }
+            # Insert after system prompt but before conversation
+            messages.insert(1, memory_system_message)
+            logger.info(f"Added relevant memories to conversation context")
+        
+        # Update current_chat
+        current_chat.clear()
+        current_chat.extend(messages)
+        
+        logger.info(f"Sending {len(messages)} messages to model in legacy endpoint")
 
         async def stream_response():
-            chunk_response = []
-            chunk_full_response = ''
-            try:
-                async for chunk in send_to_ollama_api(current_chat, model, TOOL_DEFINITIONS, stream=True):
-                    chunk_response.append(chunk)
-                    yield chunk
+            full_response = ""
+            async for chunk in send_to_ollama_api(messages, model, TOOL_DEFINITIONS, stream=True):
+                yield chunk
                 
-                chunk_full_response = ''.join(chunk_response)
-                print("\nFull response:", chunk_full_response)
-                
-                # Process all valid JSON lines
+                # Try to extract content for saving
                 try:
-                    data_list = []
-                    for line in chunk_full_response.splitlines():
-                        if line.strip() and line.startswith("data:"):
-                            try:
-                                json_str = line.replace("data: ", "").strip()
-                                if json_str != "[DONE]":  # Skip the [DONE] marker
-                                    data_list.append(json.loads(json_str))
-                            except json.JSONDecodeError:
-                                continue
-                    
-                    content_parts = []
-                    for item in data_list:
-                        if 'choices' in item and item['choices'] and 'delta' in item['choices'][0]:
-                            delta = item['choices'][0]['delta']
-                            if 'content' in delta and delta['content']:
-                                content_parts.append(delta['content'])
-                    
-                    chunk_full_response = ''.join(content_parts)
-                    
-                    if chunk_full_response.strip():
-                        await async_embed_and_save(chunk_full_response, id)
+                    chunk_data = json.loads(chunk.replace("data: ", "").strip())
+                    if 'choices' in chunk_data and chunk_data['choices'] and 'delta' in chunk_data['choices'][0]:
+                        delta = chunk_data['choices'][0]['delta']
+                        if 'content' in delta and delta['content']:
+                            full_response += delta['content']
                 except Exception as e:
-                    print(f"\nError processing response for saving: {e}")
-                    
-            except Exception as e:
-                print(f"\nError in stream_response: {e}")
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
+                    logger.warning(f"Error extracting content from chunk: {str(e)}")
+            
+            # Save the complete response
+            if full_response:
+                logger.info(f"Saving complete response ({len(full_response)} chars)")
+                await async_embed_and_save(full_response, conversation_id)
+                
+                # Add assistant response to conversation buffer
+                conversation_buffer.add_message(
+                    conversation_id=conversation_id,
+                    message={
+                        'role': 'assistant',
+                        'content': full_response,
+                        'timestamp': datetime.now().timestamp()
+                    }
+                )
+                
+                # Return the conversation ID in the response
+                yield f"\ndata: {{\"conversation_id\": \"{conversation_id}\"}}\n\n"
+            
         return StreamingResponse(stream_response(), media_type="text/event-stream")
     
     except Exception as e:
+        logger.error(f"Error in legacy chat endpoint: {str(e)}")
+        logger.exception(e)
         return {"status": "error", "message": str(e)}
+
+@app.get("/debug/messages/{conversation_id}")
+async def debug_messages(conversation_id: str):
+    """Debug endpoint to check message retrieval for a conversation"""
+    try:
+        # Try direct key listing first
+        direct_keys = redis_client.redis_client.keys(f"message:{conversation_id}:*")
+        
+        # Try to get a sample of raw data
+        sample_data = []
+        for key in direct_keys[:3]:  # Just look at first 3 keys
+            try:
+                # Get the raw data
+                raw_json = redis_client.redis_client.json().get(key)
+                sample_data.append({
+                    "key": key,
+                    "data": raw_json
+                })
+            except Exception as e:
+                sample_data.append({
+                    "key": key,
+                    "error": str(e)
+                })
+        
+        # Try normal retrieval
+        messages = []
+        try:
+            messages = redis_client.get_messages_by_conversation(conversation_id)
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Error retrieving messages: {str(e)}",
+                "direct_keys_count": len(direct_keys),
+                "direct_keys_sample": [k for k in direct_keys[:10]],
+                "sample_data": sample_data
+            }
+        
+        return {
+            "status": "success",
+            "message_count": len(messages),
+            "messages": messages[:5],  # Return first 5 messages
+            "direct_keys_count": len(direct_keys),
+            "direct_keys_sample": [k for k in direct_keys[:10]],
+            "sample_data": sample_data
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }
 
 
 @app.get("/health", status_code=200)
