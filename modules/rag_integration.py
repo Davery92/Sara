@@ -43,18 +43,14 @@ RAG_TOOL_DEFINITION = {
 }
 
 def search_knowledge_base(query: str, top_k: int = 3, filter_tags: list = None):
-    """
-    RAG tool function for the OpenAI API
-    """
     try:
         # Import here to avoid circular imports
-        from .redis_client import RedisClient
+        from .neo4j_rag_integration import get_neo4j_rag_manager
         
         # Initialize RAG manager if needed
         global rag_manager
         if not rag_manager:
-            redis_client = RedisClient(host='localhost', port=6379, db=0)
-            rag_manager = RAGManager(redis_client)
+            rag_manager = get_neo4j_rag_manager()
         
         # Perform search
         results = rag_manager.search(

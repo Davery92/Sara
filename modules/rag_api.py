@@ -13,6 +13,7 @@ import uuid
 from pydantic import BaseModel
 import traceback
 from datetime import datetime
+import asyncio
 
 # Import the RAG module
 
@@ -47,7 +48,19 @@ def get_rag_manager():
         rag_manager = get_neo4j_rag_manager()
     return rag_manager
 
-
+def run_async_in_background(async_func, *args, **kwargs):
+    """
+    Helper function to run an async function in a background task safely
+    """
+    def wrapper():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(async_func(*args, **kwargs))
+        finally:
+            loop.close()
+    
+    return wrapper
 
 @rag_router.post("/upload")
 async def upload_document(
@@ -79,22 +92,30 @@ async def upload_document(
         # Get content type
         content_type = file.content_type or "application/octet-stream"
         
-        # Process in background to avoid timeout
+        # Define a function to safely run the async process_document in a background task
         def process_document_task():
             try:
-                result = rag.process_document(
-                    file_path=temp_path,
-                    filename=file.filename,
-                    content_type=content_type,
-                    title=title,
-                    tags=tag_list
-                )
+                # Create a new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Run the async function to completion
+                    result = loop.run_until_complete(rag.process_document(
+                        file_path=temp_path,
+                        filename=file.filename,
+                        content_type=content_type,
+                        title=title,
+                        tags=tag_list
+                    ))
+                    
+                    logger.info(f"Document processing completed: {result.get('title', 'unknown')}")
+                finally:
+                    # Make sure to close the loop
+                    loop.close()
                 
                 # Clean up temp file
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
-                
-                logger.info(f"Document processing completed: {result.get('title', 'unknown')}")
                 
             except Exception as e:
                 logger.error(f"Background document processing failed: {e}")
@@ -115,9 +136,13 @@ async def upload_document(
         }
         
     except Exception as e:
-        logger.error(f"Error searching documents: {e}")
-        raise HTTPException(status_code=500, detail=f"Error searching documents: {str(e)}")
-
+        logger.error(f"Error uploading document: {e}")
+        # Make sure to clean up temp file in case of error
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise HTTPException(status_code=500, detail=f"Error uploading document: {str(e)}")
+    
+    
 @rag_router.get("/documents")
 async def list_documents(
     limit: int = Query(20, ge=1, le=100),

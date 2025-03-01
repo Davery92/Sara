@@ -64,7 +64,7 @@ class Neo4jClient:
             conversation_id: ID of the conversation this message belongs to
             date: Optional datetime object (defaults to now)
             embedding: Optional vector embedding of the message content
-            
+                
         Returns:
             The ID of the created message
         """
@@ -74,8 +74,20 @@ class Neo4jClient:
             message_id = f"message:{conversation_id}:{role}:{int(datetime.datetime.now().timestamp())}"
             
             # Convert embedding to list if it's a numpy array
-            if embedding is not None and isinstance(embedding, np.ndarray):
-                embedding = embedding.tolist()
+            if embedding is not None:
+                if isinstance(embedding, np.ndarray):
+                    embedding = embedding.tolist()
+                
+                # Ensure embedding is a flat array of numbers
+                if any(isinstance(x, (list, tuple, np.ndarray)) for x in embedding):
+                    # If it's a nested array, flatten it
+                    flat_embedding = []
+                    for item in embedding:
+                        if isinstance(item, (list, tuple, np.ndarray)):
+                            flat_embedding.extend(item)
+                        else:
+                            flat_embedding.append(item)
+                    embedding = flat_embedding
             
             # Create the base query without embedding
             query = """
@@ -126,12 +138,16 @@ class Neo4jClient:
                     })
                     CREATE (m)-[:HAS_EMBEDDING]->(e)
                     """
+                    
+                    # Only use a small sample of the embedding to avoid large properties
+                    embedding_sample = embedding[:10] if len(embedding) > 10 else embedding
+                    
                     session.run(
                         embedding_query,
                         message_id=message_id,
                         embedding_id=embedding_id,
                         dimensions=len(embedding),
-                        sample=embedding[:10]  # Store first 10 dimensions as sample
+                        sample=embedding_sample  # Store first 10 dimensions as sample
                     )
                 
                 logger.debug(f"Message stored with ID: {result_id}")

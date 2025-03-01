@@ -90,48 +90,23 @@ class Neo4jRAGManager:
         """Create necessary constraints and indices in Neo4j"""
         try:
             with self.driver.session(database=self.neo4j_db) as session:
-                # Check Neo4j version to use the correct constraint syntax
-                version_query = "CALL dbms.components() YIELD versions RETURN versions[0] as version"
-                try:
-                    version_result = session.run(version_query)
-                    version = version_result.single()["version"]
-                    neo4j_5_or_later = version.startswith("5.") or int(version.split(".")[0]) > 5
-                except Exception:
-                    # If we can't determine the version, assume it's an older version
-                    neo4j_5_or_later = False
-                    
-                # Use appropriate constraint syntax based on version
-                if neo4j_5_or_later:
-                    # Neo4j 5+ syntax
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) ON d.id IS UNIQUE")
-                    session.run("CREATE INDEX IF NOT EXISTS FOR (d:Document) ON d.title")
-                    session.run("CREATE INDEX IF NOT EXISTS FOR (d:Document) ON d.date_added")
-                    
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Chunk) ON c.id IS UNIQUE")
-                    session.run("CREATE INDEX IF NOT EXISTS FOR (c:Chunk) ON c.doc_id")
-                    
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:Entity) ON e.name IS UNIQUE")
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Concept) ON c.name IS UNIQUE")
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (t:Tag) ON t.name IS UNIQUE")
-                else:
-                    # Neo4j 4.x syntax
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS ON (d:Document) ASSERT d.id IS UNIQUE")
-                    session.run("CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.title)")
-                    session.run("CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.date_added)")
-                    
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS ON (c:Chunk) ASSERT c.id IS UNIQUE")
-                    session.run("CREATE INDEX IF NOT EXISTS FOR (c:Chunk) ON (c.doc_id)")
-                    
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS ON (e:Entity) ASSERT e.name IS UNIQUE")
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS ON (c:Concept) ASSERT c.name IS UNIQUE")
-                    session.run("CREATE CONSTRAINT IF NOT EXISTS ON (t:Tag) ASSERT t.name IS UNIQUE")
+                # Neo4j 5.x syntax (newer version)
+                session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE")
+                session.run("CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.title)")
+                session.run("CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.date_added)")
+                
+                session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE")
+                session.run("CREATE INDEX IF NOT EXISTS FOR (c:Chunk) ON (c.doc_id)")
+                
+                session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE")
+                session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE")
+                session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (t:Tag) REQUIRE t.name IS UNIQUE")
                     
                 logger.info("Neo4j constraints and indices created")
         except Exception as e:
             logger.error(f"Error creating constraints: {e}")
             # Continue without constraints - they might already exist or we lack permissions
             logger.warning("Continuing without constraints - indexes may be missing")
-    
     async def process_document(self, file_path: str, filename: str, content_type: str, 
                         title: Optional[str] = None, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -445,19 +420,21 @@ class Neo4jRAGManager:
         - Concepts (abstract ideas, themes)
         - Key points (main ideas, facts)
         - Sentiment
+        - Relevance
         """
         try:
             # Create a prompt for LLama to extract information
             prompt = f"""
             Analyze the following text and extract semantic information in JSON format.
             Include these categories:
-            - entities: List of named entities (people, places, organizations, etc.)
-            - concepts: List of abstract concepts and themes
-            - key_points: List of main ideas or facts
-            - sentiment: Overall sentiment (positive, negative, or neutral)
-            - relevance: Rate the relevance and importance of this text (1-10)
+            - entities: List of named entities (people, places, organizations, etc.) as simple strings
+            - concepts: List of abstract concepts and themes as simple strings
+            - key_points: List of main ideas or facts as simple strings
+            - sentiment: Overall sentiment (positive, negative, or neutral) as a simple string
+            - relevance: Rate the relevance and importance of this text (1-10) as a number
 
             Format the output as a valid JSON object with these fields.
+            All values must be simple strings, numbers, or arrays of strings - not complex objects.
 
             Text to analyze:
             {text}
@@ -467,7 +444,7 @@ class Neo4jRAGManager:
             response = ollama.chat(
                 model=SEMANTIC_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a semantic analysis assistant that extracts structured information from text and outputs only valid JSON."},
+                    {"role": "system", "content": "You are a semantic analysis assistant that extracts structured information from text and outputs only valid JSON with simple values - no nested objects or complex structures."},
                     {"role": "user", "content": prompt}
                 ]
             )
@@ -490,12 +467,66 @@ class Neo4jRAGManager:
             # Parse JSON
             try:
                 data = json.loads(json_str)
-                # Ensure all expected fields are present
+                
+                # Process all fields to ensure they are primitive types
+                # Entities - ensure they're simple strings
+                processed_entities = []
+                for entity in data.get('entities', []):
+                    if isinstance(entity, dict):
+                        if 'name' in entity:
+                            processed_entities.append(entity['name'])
+                    elif entity:
+                        processed_entities.append(str(entity))
+                data['entities'] = processed_entities
+                
+                # Concepts - ensure they're simple strings
+                processed_concepts = []
+                for concept in data.get('concepts', []):
+                    if isinstance(concept, dict):
+                        if 'name' in concept:
+                            processed_concepts.append(concept['name'])
+                    elif concept:
+                        processed_concepts.append(str(concept))
+                data['concepts'] = processed_concepts
+                
+                # Key points - ensure they're simple strings
+                processed_key_points = []
+                for point in data.get('key_points', []):
+                    if isinstance(point, dict):
+                        if 'text' in point:
+                            processed_key_points.append(point['text'])
+                    elif point:
+                        processed_key_points.append(str(point))
+                data['key_points'] = processed_key_points
+                
+                # Sentiment - ensure it's a simple string
+                sentiment = data.get('sentiment', 'neutral')
+                if isinstance(sentiment, dict):
+                    if 'analysis' in sentiment:
+                        data['sentiment'] = sentiment['analysis']
+                    else:
+                        # Extract first string value from the dict
+                        for val in sentiment.values():
+                            if isinstance(val, str):
+                                data['sentiment'] = val
+                                break
+                        else:
+                            data['sentiment'] = 'neutral'
+                else:
+                    data['sentiment'] = str(sentiment)
+                
+                # Relevance - ensure it's a number
+                relevance = data.get('relevance', 5)
+                if isinstance(relevance, dict) or not isinstance(relevance, (int, float)):
+                    data['relevance'] = 5
+                
+                # Ensure default values
                 data.setdefault('entities', [])
                 data.setdefault('concepts', [])
                 data.setdefault('key_points', [])
                 data.setdefault('sentiment', 'neutral')
                 data.setdefault('relevance', 5)
+                
                 return data
             except json.JSONDecodeError:
                 logger.warning(f"Failed to parse JSON from LLama response: {content}")
@@ -507,7 +538,7 @@ class Neo4jRAGManager:
                     'sentiment': 'neutral',
                     'relevance': 5
                 }
-                
+                    
         except Exception as e:
             logger.error(f"Error extracting semantic info: {e}")
             logger.exception(e)
@@ -521,8 +552,8 @@ class Neo4jRAGManager:
             }
     
     def _store_chunk(self, chunk_id: str, doc_id: str, chunk_index: int, 
-                  chunk_text: str, doc_metadata: Dict[str, Any], 
-                  embedding: List[float], semantic_info: Dict[str, Any]):
+              chunk_text: str, doc_metadata: Dict[str, Any], 
+              embedding: List[float], semantic_info: Dict[str, Any]):
         """
         Store a chunk and its semantic information in Neo4j
         Creates relationships between the chunk and:
@@ -532,6 +563,17 @@ class Neo4jRAGManager:
         """
         # For efficient storage and query, we'll store just a limited vector sample
         embedding_sample = embedding[:10]  # First 10 dimensions as a sample
+        
+        # Validate all values to ensure they are primitive types
+        # Ensure sentiment is a string
+        sentiment = semantic_info.get('sentiment', 'neutral')
+        if not isinstance(sentiment, str):
+            sentiment = str(sentiment)
+        
+        # Ensure relevance is a number
+        relevance = semantic_info.get('relevance', 5)
+        if not isinstance(relevance, (int, float)):
+            relevance = 5
         
         # Base query to create the chunk node
         chunk_query = """
@@ -577,26 +619,77 @@ class Neo4jRAGManager:
                 doc_id=doc_id,
                 chunk_index=chunk_index,
                 text=chunk_text,
-                sentiment=semantic_info.get('sentiment', 'neutral'),
-                relevance=semantic_info.get('relevance', 5),
+                sentiment=sentiment,
+                relevance=relevance,
                 embedding_sample=embedding_sample,
                 embedding_dimensions=len(embedding)
             )
             
             # Create entity relationships
             for entity in semantic_info.get('entities', []):
-                if entity and len(entity) > 1:  # Ignore very short entities
-                    session.run(entity_query, chunk_id=chunk_id, entity_name=entity)
+                # Skip if entity is None or empty
+                if not entity:
+                    continue
+                    
+                # Handle entities that may be dictionaries
+                if isinstance(entity, dict):
+                    # Extract the name from the entity dictionary
+                    entity_name = entity.get('name', '')
+                else:
+                    # It's already a string or another primitive type
+                    entity_name = str(entity)
+                    
+                # Only create entities with meaningful names
+                if entity_name and len(entity_name) > 1:  # Ignore very short entities
+                    try:
+                        session.run(entity_query, chunk_id=chunk_id, entity_name=entity_name)
+                    except Exception as e:
+                        logger.warning(f"Error creating entity {entity_name}: {e}")
+                        continue
             
             # Create concept relationships
             for concept in semantic_info.get('concepts', []):
-                if concept and len(concept) > 1:  # Ignore very short concepts
-                    session.run(concept_query, chunk_id=chunk_id, concept_name=concept)
+                # Skip if concept is None or empty
+                if not concept:
+                    continue
+                    
+                # Handle concepts that may be dictionaries
+                if isinstance(concept, dict):
+                    # Extract the name from the concept dictionary
+                    concept_name = concept.get('name', '')
+                else:
+                    # It's already a string or another primitive type
+                    concept_name = str(concept)
+                    
+                # Only create concepts with meaningful names
+                if concept_name and len(concept_name) > 1:  # Ignore very short concepts
+                    try:
+                        session.run(concept_query, chunk_id=chunk_id, concept_name=concept_name)
+                    except Exception as e:
+                        logger.warning(f"Error creating concept {concept_name}: {e}")
+                        continue
             
             # Create key point nodes
             for key_point in semantic_info.get('key_points', []):
-                if key_point and len(key_point) > 5:  # Ignore very short points
-                    session.run(key_point_query, chunk_id=chunk_id, key_point=key_point)
+                # Skip if key_point is None or empty
+                if not key_point:
+                    continue
+                    
+                # Handle key_points that may be dictionaries
+                if isinstance(key_point, dict):
+                    # Extract the text from the key_point dictionary
+                    key_point_text = key_point.get('text', '')
+                else:
+                    # It's already a string or another primitive type
+                    key_point_text = str(key_point)
+                    
+                # Only create key points with meaningful text
+                if key_point_text and len(key_point_text) > 5:  # Ignore very short points
+                    try:
+                        session.run(key_point_query, chunk_id=chunk_id, key_point=key_point_text)
+                    except Exception as e:
+                        logger.warning(f"Error creating key point: {e}")
+                        continue
     
     async def _create_chunk_relationships(self, doc_id: str):
         """

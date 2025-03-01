@@ -49,7 +49,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("openai-compatible-server")
-
+logging.getLogger("httpx").setLevel(logging.WARNING)
 app = FastAPI(title="OpenAI API Compatible Server")
 
 app.add_middleware(
