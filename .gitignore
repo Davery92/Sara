@@ -1,0 +1,5 @@
+documents/
+logs/
+env/ 
+ms-marco-MiniLM-L-6-v2/
+*.txt
