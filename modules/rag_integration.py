@@ -42,7 +42,7 @@ RAG_TOOL_DEFINITION = {
     },
 }
 
-def search_knowledge_base(query: str, top_k: int = 3, filter_tags: list = None):
+async def search_knowledge_base(query: str, top_k: int = 3, filter_tags: list = None):
     try:
         # Import here to avoid circular imports
         from .neo4j_rag_integration import get_neo4j_rag_manager
@@ -52,8 +52,8 @@ def search_knowledge_base(query: str, top_k: int = 3, filter_tags: list = None):
         if not rag_manager:
             rag_manager = get_neo4j_rag_manager()
         
-        # Perform search
-        results = rag_manager.search(
+        # Perform search (now with await)
+        results = await rag_manager.search(
             query=query,
             top_k=top_k,
             filter_tags=filter_tags

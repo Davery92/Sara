@@ -10,11 +10,13 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import uuid
 
+
 # Import the Neo4j client
 from modules.neo4j_client import Neo4jClient
 
 # Configure logging
-logger = logging.getLogger("neo4j-integration")
+# Configure logging
+logger = logging.getLogger("redis-message-store")
 
 # Neo4j connection details
 NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://10.185.1.8:7687")
@@ -79,39 +81,22 @@ def integrate_neo4j_with_server(app):
         logger.error(f"Error integrating Neo4j with server: {e}")
         raise
 
+
+
 class MessageStore:
     """
-    Message store that abstracts database access.
-    Provides compatibility with both Redis and Neo4j backends.
+    Message store that uses Redis for all conversation storage.
     """
     
-    def __init__(self, use_neo4j=True):
+    def __init__(self):
         """
         Initialize the message store
-        
-        Args:
-            use_neo4j: Whether to use Neo4j (True) or Redis (False)
         """
-        self.use_neo4j = use_neo4j
         self.client = None
         self._initialize_client()
     
     def _initialize_client(self):
-        """Initialize the database client based on configuration"""
-        if self.use_neo4j:
-            try:
-                self.client = get_neo4j_client()
-                logger.info("MessageStore using Neo4j backend")
-            except Exception as e:
-                logger.error(f"Failed to initialize Neo4j for MessageStore: {e}")
-                # Fall back to Redis if Neo4j fails
-                self.use_neo4j = False
-                self._initialize_redis()
-        else:
-            self._initialize_redis()
-    
-    def _initialize_redis(self):
-        """Initialize Redis client as fallback"""
+        """Initialize the Redis client"""
         try:
             # Import RedisClient here to avoid circular imports
             from modules.redis_client import RedisClient
@@ -123,7 +108,7 @@ class MessageStore:
     
     def store_message(self, role, content, conversation_id, date=None, embedding=None):
         """
-        Store a message with unified interface for both backends
+        Store a message with Redis
         
         Args:
             role: The role of the message sender (user/assistant/system)
@@ -138,15 +123,11 @@ class MessageStore:
         if not date:
             date = datetime.now()
             
-        if self.use_neo4j:
-            return self.client.store_message(role, content, conversation_id, date, embedding)
-        else:
-            # Redis backend
-            return self.client.store_message(role, content, conversation_id, date, embedding)
+        return self.client.store_message(role, content, conversation_id, date, embedding)
     
     def get_messages_by_conversation(self, conversation_id, limit=100):
         """
-        Get messages for a conversation with unified interface
+        Get messages for a conversation with Redis
         
         Args:
             conversation_id: ID of the conversation
@@ -155,12 +136,11 @@ class MessageStore:
         Returns:
             List of message dictionaries
         """
-        # Both backends have compatible interfaces for this method
         return self.client.get_messages_by_conversation(conversation_id, limit)
     
     def list_conversations(self, limit=20, offset=0):
         """
-        List all conversations with unified interface
+        List all conversations with implemented Redis interface
         
         Args:
             limit: Maximum number of conversations to return
@@ -169,20 +149,57 @@ class MessageStore:
         Returns:
             List of conversation dictionaries
         """
-        if self.use_neo4j:
-            return self.client.list_conversations(limit, offset)
-        else:
-            # Redis backend - implement if needed
-            # This might not be implemented in your current RedisClient
-            if hasattr(self.client, 'list_conversations'):
-                return self.client.list_conversations(limit, offset)
-            else:
-                logger.warning("list_conversations not implemented in Redis client")
-                return []
+        try:
+            # Pattern to match all message keys
+            pattern = "message:*"
+            all_message_keys = self.client.redis_client.keys(pattern)
+            
+            # Extract unique conversation IDs
+            conversations = {}
+            for key in all_message_keys:
+                # Skip embedding keys
+                if isinstance(key, bytes):
+                    key = key.decode('utf-8', errors='ignore')
+                
+                if ":embedding" in key:
+                    continue
+                
+                # Format: message:conversation_id:role:timestamp
+                parts = key.split(':')
+                if len(parts) >= 4:
+                    conv_id = parts[1]
+                    role = parts[2]
+                    timestamp = parts[3]
+                    
+                    if conv_id not in conversations or int(timestamp) > int(conversations[conv_id]["timestamp"]):
+                        # Get the message content
+                        message_data = self.client.get_message_by_key(key)
+                        if message_data:
+                            content = message_data.get("content", "")
+                            content_preview = (content[:100] + "...") if len(content) > 100 else content
+                            
+                            conversations[conv_id] = {
+                                "id": conv_id,
+                                "last_message": content_preview,
+                                "timestamp": timestamp,
+                                "last_role": role
+                            }
+            
+            # Convert to list and sort by timestamp (newest first)
+            conversation_list = list(conversations.values())
+            conversation_list.sort(key=lambda x: int(x["timestamp"]), reverse=True)
+            
+            # Apply pagination
+            paginated_results = conversation_list[offset:offset+limit]
+            
+            return paginated_results
+        except Exception as e:
+            logger.error(f"Error listing conversations from Redis: {e}")
+            return []
     
     def update_conversation_title(self, conversation_id, title):
         """
-        Update conversation title with unified interface
+        Store conversation title in Redis
         
         Args:
             conversation_id: ID of the conversation
@@ -191,19 +208,18 @@ class MessageStore:
         Returns:
             True if successful, False otherwise
         """
-        if self.use_neo4j:
-            return self.client.update_conversation_title(conversation_id, title)
-        else:
-            # Redis backend - implement if needed
-            if hasattr(self.client, 'update_conversation_title'):
-                return self.client.update_conversation_title(conversation_id, title)
-            else:
-                logger.warning("update_conversation_title not implemented in Redis client")
-                return False
+        try:
+            # Store the title as a separate key
+            title_key = f"conversation:title:{conversation_id}"
+            self.client.redis_client.set(title_key, title)
+            return True
+        except Exception as e:
+            logger.error(f"Error updating conversation title: {e}")
+            return False
     
     def delete_conversation(self, conversation_id):
         """
-        Delete a conversation with unified interface
+        Delete a conversation with Redis
         
         Args:
             conversation_id: ID of the conversation
@@ -211,19 +227,31 @@ class MessageStore:
         Returns:
             True if successful, False otherwise
         """
-        if self.use_neo4j:
-            return self.client.delete_conversation(conversation_id)
-        else:
-            # Redis backend - implement if needed
-            if hasattr(self.client, 'delete_conversation'):
-                return self.client.delete_conversation(conversation_id)
-            else:
-                logger.warning("delete_conversation not implemented in Redis client")
-                return False
+        try:
+            # Get all keys for this conversation
+            pattern = f"message:{conversation_id}:*"
+            keys = self.client.redis_client.keys(pattern)
+            
+            # Also get title key
+            title_key = f"conversation:title:{conversation_id}"
+            
+            if keys:
+                # Delete all keys
+                self.client.redis_client.delete(*keys)
+                
+            # Delete title key if it exists
+            if self.client.redis_client.exists(title_key):
+                self.client.redis_client.delete(title_key)
+            
+            logger.info(f"Deleted conversation {conversation_id} with {len(keys)} messages")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting conversation: {e}")
+            return False
     
     def vector_search(self, embedding, k=3):
         """
-        Find similar messages with unified interface
+        Find similar messages with Redis
         
         Args:
             embedding: Vector embedding
@@ -232,24 +260,24 @@ class MessageStore:
         Returns:
             List of similar messages
         """
-        # Both backends have compatible interfaces for this method
         return self.client.vector_search(embedding, k)
     
     def ping(self):
-        """Test connection to the database"""
+        """Test connection to Redis"""
         return self.client.ping()
 
 # Create a global instance for easy access
 message_store = None
 
-def get_message_store(use_neo4j=True):
+def get_message_store():
     """Get the global message store instance"""
     global message_store
     if message_store is None:
-        message_store = MessageStore(use_neo4j=use_neo4j)
+        message_store = MessageStore()
     return message_store
+# Create a global instance for easy access
+message_store = None
 
-# Test function
 def test_message_store():
     """Test the message store implementation"""
     store = get_message_store(use_neo4j=True)

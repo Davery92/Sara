@@ -37,7 +37,7 @@ from modules.neo4j_integration import get_message_store, integrate_neo4j_with_se
 
 
 # Initialize the message store with Neo4j backend
-message_store = get_message_store(use_neo4j=True)
+message_store = get_message_store()
 
 # Configure logging
 logging.basicConfig(

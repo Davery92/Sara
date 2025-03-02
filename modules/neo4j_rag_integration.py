@@ -852,8 +852,8 @@ class Neo4jRAGManager:
             result = session.run(query, doc_id=doc_id)
             return [dict(record) for record in result]
     
-    def search(self, query: str, top_k: int = TOP_K_FINAL, 
-            filter_tags: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    async def search(self, query: str, top_k: int = TOP_K_FINAL, 
+        filter_tags: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         Search for relevant document chunks using Neo4j
         Combines semantic search using embeddings, entity/concept matching, 
@@ -868,7 +868,7 @@ class Neo4jRAGManager:
             embedding = embedding_result.get('embedding', [])
             
             # Extract entities and concepts from the query
-            semantic_info = asyncio.run(self._extract_semantic_info(query))
+            semantic_info = await self._extract_semantic_info(query)
             entities = semantic_info.get('entities', [])
             concepts = semantic_info.get('concepts', [])
             
