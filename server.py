@@ -878,6 +878,78 @@ async def maybe_summarize_conversation(conversation_id):
         return await summarize_conversation(conversation_id)
     return None
 
+def add_message_to_conversation(conversation_id, role, content):
+    """
+    Add a message to conversation history, maintaining 10-message limit.
+    Only user and assistant messages are stored, not tool calls.
+    The oldest message is removed when the limit is reached.
+    """
+    try:
+        # Get current conversation messages
+        current_messages = message_store.get_messages_by_conversation(conversation_id)
+        
+        # Skip if it's a tool message
+        if role == 'tool':
+            logger.info(f"Skipping storage of tool message in conversation {conversation_id}")
+            return None
+        
+        # Ensure content is a string
+        if not isinstance(content, str):
+            try:
+                content = str(content)
+            except Exception as e:
+                logger.error(f"Failed to convert content to string: {str(e)}")
+                content = "Error: Could not convert content to string"
+        
+        today = datetime.now()
+        
+        # Generate embedding for the message
+        embedding = text_to_embedding_ollama(content)['embeddings']
+        
+        # Store the new message
+        logger.info(f"Adding {role} message to conversation {conversation_id}")
+        message_id = message_store.store_message(
+            role=role,
+            content=content,
+            conversation_id=conversation_id,
+            date=today,
+            embedding=embedding
+        )
+        
+        # Add to conversation buffer for background processing
+        conversation_buffer.add_message(
+            conversation_id=conversation_id,
+            message={
+                'role': role,
+                'content': content,
+                'timestamp': today.timestamp()
+            }
+        )
+        
+        # If we now have more than 10 messages, remove the oldest one
+        if len(current_messages) >= 10:
+            logger.info(f"Conversation {conversation_id} has reached the 10-message limit, removing oldest")
+            
+            # Sort messages by timestamp
+            sorted_messages = sorted(current_messages, key=lambda x: x.get('timestamp', 0))
+            
+            # Get the oldest message
+            oldest_message = sorted_messages[0]
+            
+            # Delete the oldest message
+            try:
+                # Construct the message key format based on your Redis implementation
+                oldest_key = f"message:{conversation_id}:{oldest_message['role']}:{oldest_message['timestamp']}"
+                message_store.message_store.delete(oldest_key)
+                logger.info(f"Deleted oldest message with key {oldest_key}")
+            except Exception as e:
+                logger.error(f"Error deleting oldest message: {str(e)}")
+        
+        return message_id
+    except Exception as e:
+        logger.error(f"Error in add_message_to_conversation: {str(e)}")
+        return None
+
 def list_notes() -> List[Dict[str, Any]]:
     """List all available notes with metadata"""
     try:
@@ -1592,7 +1664,7 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
         try:
             # Pretty print the request data to see exactly what's being sent
             import json
-            logger.info(f"JSON request data: {json.dumps(data, indent=2)}")
+            #logger.info(f"JSON request data: {json.dumps(data, indent=2)}")
             
             # Make sure tools are properly serializable
             json.dumps(data['tools'])  # This will raise an error if there's an issue
@@ -1913,47 +1985,14 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
     if not latest_user_message:
         raise HTTPException(status_code=400, detail="No user message found in request")
     
-    # Store the latest user message
-    try:
-        msg_content = latest_user_message['content']
-        embeddings = text_to_embedding_ollama(msg_content)
-        embedding = embeddings['embeddings']
-        
-        # Store using the message store
-        message_store.store_message(
-            role='user',
-            content=msg_content,
-            conversation_id=conversation_id,
-            date=today,
-            embedding=embedding
-        )
-        
-        # Add to conversation buffer
-        need_summarization = conversation_buffer.add_message(
-            conversation_id=conversation_id,
-            message={
-                'role': 'user',
-                'content': msg_content,
-                'timestamp': today.timestamp()
-            }
-        )
-        
-        # If buffer is full, schedule summarization
-        if need_summarization:
-            background_tasks.add_task(
-                summarize_buffer_and_update_profile,
-                conversation_id=conversation_id
-            )
-        
-        # Write to file (if needed)
-        write_to_file('User', msg_content, formatted_date)
-    except Exception as e:
-        logger.error(f"Error storing user message: {str(e)}")
-        logger.exception(e)
+    # Store the latest user message using the new function
+    add_message_to_conversation(conversation_id, 'user', latest_user_message['content'])
     
-    # Get conversation history (last 10 messages) - USING MESSAGE STORE INSTEAD OF REDIS
+    # Write to file (if needed)
+    write_to_file('User', latest_user_message['content'], formatted_date)
+    
+    # Get conversation history - limited to last 10 messages
     conversation_history = message_store.get_messages_by_conversation(conversation_id, limit=10)
-    
     
     # Prepare messages for the AI with system prompt and conversation history
     messages = []
@@ -2019,18 +2058,8 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
             # Save the complete response
             if full_response:
                 logger.info(f"Saving complete response ({len(full_response)} chars)")
-                # Store assistant response in the same conversation
-                await async_embed_and_save(full_response, conversation_id)
-                
-                # Add assistant response to conversation buffer
-                conversation_buffer.add_message(
-                    conversation_id=conversation_id,
-                    message={
-                        'role': 'assistant',
-                        'content': full_response,
-                        'timestamp': datetime.now().timestamp()
-                    }
-                )
+                # Store assistant response using the new function
+                add_message_to_conversation(conversation_id, 'assistant', full_response)
                 
         return StreamingResponse(
             stream_response(),
@@ -2055,7 +2084,7 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
                 
                 if tool_outputs:
                     logger.info(f"Tool outputs received, sending follow-up request")
-                    # Add tool outputs to the conversation
+                    # Add tool outputs to the conversation (temporarily, not stored in history)
                     for tool_output in tool_outputs:
                         messages.append(tool_output)
                     
@@ -2068,17 +2097,8 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
             
             # Save assistant response in the same conversation
             if assistant_content:
-                await async_embed_and_save(assistant_content, conversation_id)
-                
-                # Add assistant response to conversation buffer
-                conversation_buffer.add_message(
-                    conversation_id=conversation_id,
-                    message={
-                        'role': 'assistant',
-                        'content': assistant_content,
-                        'timestamp': datetime.now().timestamp()
-                    }
-                )
+                # Store only the final assistant response, not any intermediate tool calls
+                add_message_to_conversation(conversation_id, 'assistant', assistant_content)
             
             # Format response to match OpenAI's format
             openai_response = {
