@@ -1522,11 +1522,11 @@ def get_message_by_key(self, key):
 # File operations
 def write_to_file(role, content, dates):
     try:
-        with open(f"/home/david/sara-jarvis/Test/{dates}.txt",'x+') as f:
+        with open(f"/home/david/Sara/logs/{dates}.txt",'x+') as f:
             pass
     except FileExistsError:
         pass
-    with open(f"/home/david/sara-jarvis/Test/{dates}.txt", 'a+') as f:
+    with open(f"/home/david/Sara/logs/{dates}.txt", 'a+') as f:
         f.write(f"{role}:\n")
         f.write(content + "\n")
 
@@ -1989,7 +1989,7 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
     add_message_to_conversation(conversation_id, 'user', latest_user_message['content'])
     
     # Write to file (if needed)
-    write_to_file('User', latest_user_message['content'], formatted_date)
+    #write_to_file('User', latest_user_message['content'], formatted_date)
     
     # Get conversation history - limited to last 10 messages
     conversation_history = message_store.get_messages_by_conversation(conversation_id, limit=10)
@@ -2239,7 +2239,7 @@ async def receive_chat_message(data: dict = Body(...), background_tasks: Backgro
             )
         
         # Write to file
-        write_to_file('User', msg_content, formatted_date)
+        #write_to_file('User', msg_content, formatted_date)
         
         # Get conversation history (last 10 messages)
         conversation_history = manage_conversation_window(conversation_id, max_history=10)
