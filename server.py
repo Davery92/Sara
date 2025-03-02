@@ -76,7 +76,7 @@ CORE_MEMORY_FILE = "/home/david/Sara/core_memories.txt"
 MODEL_MAPPING = {
     "gpt-4": "llama3.3",
     "gpt-3.5-turbo": "mistral-small",
-    "gpt-3.5-turbo-0125": "llama3.1",
+    "gpt-3.5-turbo-0125": "command-r7b",
     "gpt-3.5-turbo-1106": "llama3.2",
     # Add more mappings as needed
     "default": "llama3.3"
@@ -87,7 +87,8 @@ AVAILABLE_MODELS = [
     "llama3.3:latest",
     "mistral-small:latest",
     "llama3.2:latest",
-    "llama3.1:latest"
+    "llama3.1:latest",
+    "command-r7b"
 ]
 
 # URLs for different models
@@ -96,6 +97,7 @@ MODEL_URLS = {
     "llama3.2": "http://localhost:11434/api/chat",
     "llama3.1": "http://localhost:11434/api/chat",
     "mistral-small": "http://localhost:11434/api/chat",
+    "command-r7b": "http://localhost:11434/api/chat",
     "default": "http://localhost:11434/api/chat"
 }
 
@@ -807,7 +809,7 @@ async def summarize_buffer_and_update_profile(conversation_id):
         ]
         
         # Get extraction using non-streaming request
-        response = await fetch_ollama_response(extract_messages, "llama3.1", stream=False)
+        response = await fetch_ollama_response(extract_messages, "command-r7b", stream=False)
         
         if 'message' in response and 'content' in response['message']:
             new_info = response['message']['content']
