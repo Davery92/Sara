@@ -63,6 +63,9 @@ app.add_middleware(
 # Define the notes directory
 NOTES_DIRECTORY = "/home/david/Sara/notes"
 
+MESSAGE_HISTORY = []
+MAX_HISTORY = 10  # Maximum number of messages (excluding system prompt)
+
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
 
@@ -444,7 +447,52 @@ async def get_user_profile(user_id: str):
         return {"profile": "No profile information available"}
     return {"profile": profile}
 
+def add_message_to_history(role, content):
+    """
+    Add a message to the in-memory conversation history
+    
+    Args:
+        role (str): 'user' or 'assistant'
+        content (str): Message content
+    """
+    global MESSAGE_HISTORY
+    
+    # Skip tool messages
+    if role == 'tool':
+        return
+    
+    # Add new message
+    MESSAGE_HISTORY.append({'role': role, 'content': content})
+    
+    # If we exceed maximum history, remove the oldest message
+    if len(MESSAGE_HISTORY) > MAX_HISTORY:
+        MESSAGE_HISTORY.pop(0)  # Remove oldest message
+        logger.info("Removed oldest message from conversation history")
 
+def get_messages_with_system_prompt():
+    """
+    Get the full message list with system prompt for the model
+    
+    Returns:
+        list: Complete message list for sending to model
+    """
+    global MESSAGE_HISTORY
+    
+    # Get current date and time
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Create system message with current date
+    system_message = {'role': 'system', 'content': f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}"}
+    
+    # Combine system message with conversation history
+    messages = [system_message] + MESSAGE_HISTORY
+    
+    return messages
+
+def clear_conversation_history():
+    """Reset the conversation history"""
+    global MESSAGE_HISTORY
+    MESSAGE_HISTORY = []
 
 async def root():
     """Root endpoint to help diagnose connection issues"""
@@ -1960,24 +2008,14 @@ class EmbeddingRequest(BaseModel):
 
 # OpenAI API Compatible Endpoints
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest, background_tasks: BackgroundTasks):
-    global current_chat
-    
-    # Process the request
-    client_messages = request.messages.copy()  # Create a copy to avoid modifying the original
+async def chat_completions(request: ChatCompletionRequest):
+    # Extract request parameters
+    client_messages = request.messages.copy()
     model = request.model
     stream = request.stream
-    tools = request.tools or TOOL_DEFINITIONS  # Always use tools
+    tools = request.tools or TOOL_DEFINITIONS
     
-    # Get conversation ID from user field if provided, otherwise generate new
-    conversation_id = request.user if request.user and request.user.startswith("conv_") else f"conv_{str(uuid4())}"
-    
-    today = datetime.now()
-    formatted_date = today.strftime("%m-%d-%Y")
-    
-    logger.info(f"Chat completion request: model={model}, stream={stream}, conversation_id={conversation_id}")
-    
-    # Extract the latest user message from the client's messages
+    # Extract latest user message
     latest_user_message = None
     for msg in reversed(client_messages):
         if msg['role'] == 'user':
@@ -1987,67 +2025,30 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
     if not latest_user_message:
         raise HTTPException(status_code=400, detail="No user message found in request")
     
-    # Store the latest user message using the new function
-    add_message_to_conversation(conversation_id, 'user', latest_user_message['content'])
+    # Add user message to history
+    add_message_to_history('user', latest_user_message['content'])
     
-    # Write to file (if needed)
-    #write_to_file('User', latest_user_message['content'], formatted_date)
+    # Get messages for model
+    messages = get_messages_with_system_prompt()
     
-    # Get conversation history - limited to last 10 messages
-    conversation_history = message_store.get_messages_by_conversation(conversation_id, limit=10)
+    logger.info(f"Sending {len(messages)} messages to model")
     
-    # Prepare messages for the AI with system prompt and conversation history
-    messages = []
+    # Still store in Redis for vector search functionality
+    # This doesn't affect the conversation history logic
+    if message_store:
+        try:
+            embed_and_save(latest_user_message['content'], "primary_conversation", "user")
+        except Exception as e:
+            logger.error(f"Error storing message in Redis: {str(e)}")
     
-    # Add system prompt
-    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Get user profile
-    user_profile = read_note("user_profile")
-    user_profile_content = ""
-    if "error" not in user_profile:
-        user_profile_content = f"\n\nUser Profile:\n{user_profile.get('content', '')}"
-        logger.info(f"Adding user profile ({len(user_profile_content)} chars) to system prompt")
-    
-    # Add system prompt with current date/time and user profile
-    system_prompt_with_context = f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}{user_profile_content}"
-    messages.append({'role': 'system', 'content': system_prompt_with_context})
-    
-    # Add memory context if available
-    memory_context = await retrieve_relevant_memories(latest_user_message['content'], conversation_id)
-    if memory_context:
-        memory_system_message = {
-            'role': 'system',
-            'content': f"The following are relevant memories from past conversations that may help with this request:\n\n{memory_context}\n\nUse these memories if they're relevant to the current conversation."
-        }
-        messages.append(memory_system_message)
-        logger.info(f"Added relevant memories to conversation context")
-    
-    # Add conversation history (converts Redis format to OpenAI message format)
-    for msg in conversation_history:
-        if 'role' in msg and 'content' in msg:
-            messages.append({
-                'role': msg['role'],
-                'content': msg['content']
-            })
-    
-    # Add background tasks
-    background_tasks.add_task(maybe_summarize_conversation, conversation_id)
-    
-    # Update current chat
-    current_chat = messages.copy()
-    
-    logger.info(f"Sending conversation with {len(messages)} messages to model")
-    
-    # Process the completion request
+    # Handle streaming response
     if stream:
-        # Streaming response
         async def stream_response():
             full_response = ""
             async for chunk in send_to_ollama_api(messages, model, tools, stream=True):
                 yield chunk
                 
-                # Try to extract content for saving
+                # Extract content for saving
                 try:
                     chunk_data = json.loads(chunk.replace("data: ", "").strip())
                     if 'choices' in chunk_data and chunk_data['choices'] and 'delta' in chunk_data['choices'][0]:
@@ -2055,52 +2056,36 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
                         if 'content' in delta and delta['content']:
                             full_response += delta['content']
                 except Exception as e:
-                    logger.warning(f"Error extracting content from chunk: {str(e)}")
+                    pass
             
-            # Save the complete response
+            # Add assistant response to history
             if full_response:
-                logger.info(f"Saving complete response ({len(full_response)} chars)")
-                # Store assistant response using the new function
-                add_message_to_conversation(conversation_id, 'assistant', full_response)
+                add_message_to_history('assistant', full_response)
                 
+                # Optionally also store in Redis for vector search
+                if message_store:
+                    try:
+                        embed_and_save(full_response, "primary_conversation", "assistant")
+                    except Exception as e:
+                        logger.error(f"Error storing response in Redis: {str(e)}")
+        
         return StreamingResponse(
             stream_response(),
             media_type="text/event-stream"
         )
     else:
-        # Non-streaming response
+        # Non-streaming implementation
         try:
-            logger.info(f"Making non-streaming request with {len(tools)} tools")
             response = await fetch_ollama_response(messages, model, tools)
             
-            # Extract content
             assistant_content = ""
             if 'message' in response and 'content' in response['message']:
                 assistant_content = response['message']['content']
-                logger.info(f"Received response with {len(assistant_content)} chars")
-            
-            # Check for tool calls in the response
-            if 'message' in response and 'tool_calls' in response['message']:
-                logger.info(f"Response contains tool calls, processing...")
-                tool_outputs = await process_tool_calls(response)
+                add_message_to_history('assistant', assistant_content)
                 
-                if tool_outputs:
-                    logger.info(f"Tool outputs received, sending follow-up request")
-                    # Add tool outputs to the conversation (temporarily, not stored in history)
-                    for tool_output in tool_outputs:
-                        messages.append(tool_output)
-                    
-                    # Make a follow-up request to get the final response
-                    follow_up_response = await fetch_ollama_response(messages, model, tools)
-                    
-                    if 'message' in follow_up_response and 'content' in follow_up_response['message']:
-                        assistant_content = follow_up_response['message']['content']
-                        logger.info(f"Received follow-up response with {len(assistant_content)} chars")
-            
-            # Save assistant response in the same conversation
-            if assistant_content:
-                # Store only the final assistant response, not any intermediate tool calls
-                add_message_to_conversation(conversation_id, 'assistant', assistant_content)
+                # Optionally store in Redis for vector search
+                if message_store:
+                    embed_and_save(assistant_content, "primary_conversation", "assistant")
             
             # Format response to match OpenAI's format
             openai_response = {
@@ -2129,7 +2114,6 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
             
         except Exception as e:
             logger.error(f"Error in completion: {str(e)}")
-            logger.exception(e)
             raise HTTPException(status_code=500, detail=f"Error in completion: {str(e)}")
 
 @app.post("/v1/embeddings")
@@ -2198,90 +2182,23 @@ async def list_models():
 
 # Backward compatibility with the original API
 @app.post("/api/chat")
-async def receive_chat_message(data: dict = Body(...), background_tasks: BackgroundTasks = None):
+async def receive_chat_message(data: dict = Body(...)):
     try:
-        # Extract conversation_id from data if provided, otherwise generate new
-        conversation_id = data.get("conversation_id", f"conv_{str(uuid4())}")
-        today = datetime.now()
-        formatted_date = today.strftime("%m-%d-%Y")
         message = data["message"]
         model = data["model"]
         msg_content = message["content"]
         
-        logger.info(f"Legacy chat API called with conversation_id={conversation_id}")
+        logger.info(f"Legacy chat API called")
         
-        # Get embeddings
-        embeddings = text_to_embedding_ollama(msg_content)
-        embedding = embeddings['embeddings']
+        # Add user message to history
+        add_message_to_history('user', msg_content)
         
-        # Store in Redis
-        message_store.store_message(
-            role='user',
-            content=msg_content,
-            conversation_id=conversation_id,
-            date=today,
-            embedding=embedding
-        )
+        # Optionally store in Redis for vector search
+        if message_store:
+            embed_and_save(msg_content, "primary_conversation", "user")
         
-        # Add to conversation buffer
-        need_summarization = conversation_buffer.add_message(
-            conversation_id=conversation_id,
-            message={
-                'role': 'user',
-                'content': msg_content,
-                'timestamp': today.timestamp()
-            }
-        )
-        
-        # If buffer is full, schedule summarization
-        if need_summarization and background_tasks is not None:
-            background_tasks.add_task(
-                summarize_buffer_and_update_profile,
-                conversation_id=conversation_id
-            )
-        
-        # Write to file
-        #write_to_file('User', msg_content, formatted_date)
-        
-        # Get conversation history (last 10 messages)
-        conversation_history = manage_conversation_window(conversation_id, max_history=10)
-        
-        # Prepare messages for the model
-        messages = []
-        
-        # Get user profile
-        user_profile = read_note("user_profile")
-        user_profile_content = ""
-        if "error" not in user_profile:
-            user_profile_content = f"\n\nUser Profile:\n{user_profile.get('content', '')}"
-            logger.info(f"Adding user profile ({len(user_profile_content)} chars) to system prompt")
-        
-        # Add system prompt with user profile
-        system_prompt_with_context = f"{SYSTEM_PROMPT}{user_profile_content}"
-        messages.append({'role': 'system', 'content': system_prompt_with_context})
-        
-        # Add conversation history
-        for msg in conversation_history:
-            if 'role' in msg and 'content' in msg:
-                messages.append({
-                    'role': msg['role'],
-                    'content': msg['content']
-                })
-        
-        # Add memory context if available
-        memory_context = await retrieve_relevant_memories(msg_content, conversation_id)
-        if memory_context:
-            memory_system_message = {
-                'role': 'system',
-                'content': f"The following are relevant memories from past conversations that may help with this request:\n\n{memory_context}\n\nUse these memories if they're relevant to the current conversation."
-            }
-            # Insert after system prompt but before conversation
-            messages.insert(1, memory_system_message)
-            logger.info(f"Added relevant memories to conversation context")
-        
-        # Update current_chat
-        current_chat.clear()
-        current_chat.extend(messages)
+        # Get messages for model
+        messages = get_messages_with_system_prompt()
         
         logger.info(f"Sending {len(messages)} messages to model in legacy endpoint")
 
@@ -2290,7 +2207,7 @@ async def receive_chat_message(data: dict = Body(...), background_tasks: Backgro
             async for chunk in send_to_ollama_api(messages, model, TOOL_DEFINITIONS, stream=True):
                 yield chunk
                 
-                # Try to extract content for saving
+                # Extract content for saving
                 try:
                     chunk_data = json.loads(chunk.replace("data: ", "").strip())
                     if 'choices' in chunk_data and chunk_data['choices'] and 'delta' in chunk_data['choices'][0]:
@@ -2298,31 +2215,23 @@ async def receive_chat_message(data: dict = Body(...), background_tasks: Backgro
                         if 'content' in delta and delta['content']:
                             full_response += delta['content']
                 except Exception as e:
-                    logger.warning(f"Error extracting content from chunk: {str(e)}")
+                    pass
             
-            # Save the complete response
+            # Add assistant response to history
             if full_response:
-                logger.info(f"Saving complete response ({len(full_response)} chars)")
-                await async_embed_and_save(full_response, conversation_id)
+                add_message_to_history('assistant', full_response)
                 
-                # Add assistant response to conversation buffer
-                conversation_buffer.add_message(
-                    conversation_id=conversation_id,
-                    message={
-                        'role': 'assistant',
-                        'content': full_response,
-                        'timestamp': datetime.now().timestamp()
-                    }
-                )
+                # Optionally store in Redis for vector search
+                if message_store:
+                    embed_and_save(full_response, "primary_conversation", "assistant")
                 
-                # Return the conversation ID in the response
-                yield f"\ndata: {{\"conversation_id\": \"{conversation_id}\"}}\n\n"
+                # Return fixed conversation ID in the response
+                yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
             
         return StreamingResponse(stream_response(), media_type="text/event-stream")
     
     except Exception as e:
         logger.error(f"Error in legacy chat endpoint: {str(e)}")
-        logger.exception(e)
         return {"status": "error", "message": str(e)}
 
 @app.get("/debug/messages/{conversation_id}")
