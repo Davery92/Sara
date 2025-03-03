@@ -33,7 +33,7 @@ TOP_K_INITIAL = 15  # Initial retrieval count
 TOP_K_FINAL = 3  # Final count after reranking
 EMBEDDING_MODEL = "bge-m3"  # Ollama embedding model
 EMBEDDING_DIMENSION = 1024  # BGE-M3 embedding dimension
-SEMANTIC_MODEL = "llama3.1"  # Model for semantic analysis
+SEMANTIC_MODEL = "command-r7b"  # Model for semantic analysis
 
 # Ensure documents directory exists
 os.makedirs(DOCUMENTS_DIRECTORY, exist_ok=True)
