@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Sara AI Assistant</title>
     <style>
         :root {
@@ -32,13 +32,17 @@
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
             background-color: var(--bg-color);
             color: var(--text-color);
-            height: 100vh;
-            /* Use custom property for mobile browsers */
-            height: calc(var(--vh, 1vh) * 100);
-            display: flex;
-            overflow: hidden;
-            position: fixed;
+            height: 100%;
+            /* Remove position: fixed that prevents scrolling */
+            position: relative;
             width: 100%;
+            overflow-x: hidden;
+        }
+
+        .app-container {
+            display: flex;
+            height: 100vh;
+            height: calc(var(--vh, 1vh) * 100);
         }
 
         .sidebar {
@@ -50,6 +54,7 @@
             border-right: 1px solid var(--border-color);
             transition: transform 0.3s ease;
             overflow-y: auto;
+            z-index: 100;
         }
 
         .sidebar-collapsed {
@@ -146,6 +151,7 @@
             flex-direction: column;
             height: 100%;
             position: relative;
+            overflow: hidden; /* Prevent horizontal scroll */
         }
 
         .menu-button {
@@ -172,6 +178,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            flex-shrink: 0;
         }
 
         .chat-header h1 {
@@ -182,6 +189,7 @@
         .chat-container {
             flex: 1;
             overflow-y: auto;
+            -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
             padding: 24px 0;
             scroll-behavior: smooth;
             display: flex;
@@ -264,6 +272,8 @@
             border-top: 1px solid var(--border-color);
             padding: 16px;
             position: relative;
+            flex-shrink: 0;
+            background-color: var(--bg-color);
         }
 
         .input-container {
@@ -335,6 +345,7 @@
             height: 100%;
             padding: 0 24px;
             text-align: center;
+            flex: 1;
         }
 
         .empty-state-icon {
@@ -468,6 +479,7 @@
                 z-index: 100;
                 height: 100%;
                 transform: translateX(-100%);
+                box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
             }
 
             .sidebar.show {
@@ -493,104 +505,136 @@
             
             /* Make chat container leave space for input */
             .chat-container {
-                padding-bottom: 80px;
+                padding-bottom: 16px;
             }
             
             /* Adjust margins on input to use space better */
             .input-container {
                 margin: 0 4px;
             }
+            
+            /* Reduce padding on empty state for mobile */
+            .empty-state {
+                padding: 16px;
+            }
+            
+            /* Make suggestion chips smaller on mobile */
+            .suggestion-chip {
+                padding: 6px 12px;
+                font-size: 13px;
+            }
+        }
+        
+        /* iOS-specific fixes */
+        @supports (-webkit-touch-callout: none) {
+            body {
+                /* Prevent overscroll effects */
+                overflow: hidden;
+            }
+            
+            .app-container {
+                /* Enable scrolling within the container */
+                overflow: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            
+            .chat-container {
+                /* Ensure iOS momentum scrolling works */
+                -webkit-overflow-scrolling: touch;
+            }
         }
     </style>
 </head>
 <body>
-    <!-- Sidebar -->
-    <div class="sidebar" id="sidebar">
-        <button class="new-chat-btn" id="new-chat-btn">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="12" y1="5" x2="12" y2="19"></line>
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-            New Chat
-        </button>
-
-        <div class="conversation-list" id="conversation-list">
-            <!-- Simplified - we only show one conversation -->
-            <div class="conversation-item active" data-id="current_session">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="conversation-item-icon">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                </svg>
-                <span class="conversation-item-text">Current Conversation</span>
-            </div>
-        </div>
-
-        <div class="sidebar-footer">
-            <button class="sidebar-footer-button" id="clear-chat">
+    <div class="app-container">
+        <!-- Sidebar -->
+        <div class="sidebar" id="sidebar">
+            <button class="new-chat-btn" id="new-chat-btn">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M3 6h18"></path>
-                    <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
-                    <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
                 </svg>
-                Clear chat
+                New Chat
             </button>
-        </div>
-    </div>
 
-    <!-- Main Content -->
-    <div class="main-content">
-        <button class="menu-button" id="menu-button">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="3" y1="12" x2="21" y2="12"></line>
-                <line x1="3" y1="6" x2="21" y2="6"></line>
-                <line x1="3" y1="18" x2="21" y2="18"></line>
-            </svg>
-        </button>
-
-        <div class="chat-header">
-            <h1>Sara AI Assistant</h1>
-        </div>
-
-        <!-- Empty state (shown when no conversation is active) -->
-        <div class="empty-state" id="empty-state">
-            <div class="empty-state-icon">
-                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M8 12h8"></path>
-                    <path d="M12 8v8"></path>
-                </svg>
-            </div>
-            <h2>How can I help you today?</h2>
-            <p>Type a message to start a conversation, or try one of these suggestions:</p>
-            <div class="suggestion-chips">
-                <div class="suggestion-chip">Explain quantum computing</div>
-                <div class="suggestion-chip">Write a short story about time travel</div>
-                <div class="suggestion-chip">Help me plan a vacation</div>
-                <div class="suggestion-chip">Give me a healthy dinner recipe</div>
-            </div>
-        </div>
-
-        <!-- Chat container (hidden initially) -->
-        <div class="chat-container hidden" id="chat-container">
-            <div class="messages-wrapper" id="messages-wrapper">
-                <!-- Messages will be added here -->
-            </div>
-        </div>
-
-        <!-- Input area -->
-        <div class="input-area">
-            <div class="input-container">
-                <textarea 
-                    class="message-input" 
-                    id="message-input" 
-                    placeholder="Message Sara..."
-                    rows="1"
-                ></textarea>
-                <button class="send-button" id="send-button" disabled>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="22" y1="2" x2="11" y2="13"></line>
-                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            <div class="conversation-list" id="conversation-list">
+                <!-- Simplified - we only show one conversation -->
+                <div class="conversation-item active" data-id="current_session">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="conversation-item-icon">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                     </svg>
+                    <span class="conversation-item-text">Current Conversation</span>
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <button class="sidebar-footer-button" id="clear-chat">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 6h18"></path>
+                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                    </svg>
+                    Clear chat
                 </button>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <button class="menu-button" id="menu-button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+            </button>
+
+            <div class="chat-header">
+                <h1>Sara AI Assistant</h1>
+            </div>
+
+            <!-- Empty state (shown when no conversation is active) -->
+            <div class="empty-state" id="empty-state">
+                <div class="empty-state-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <path d="M8 12h8"></path>
+                        <path d="M12 8v8"></path>
+                    </svg>
+                </div>
+                <h2>How can I help you today?</h2>
+                <p>Type a message to start a conversation, or try one of these suggestions:</p>
+                <div class="suggestion-chips">
+                    <div class="suggestion-chip">Explain quantum computing</div>
+                    <div class="suggestion-chip">Write a short story about time travel</div>
+                    <div class="suggestion-chip">Help me plan a vacation</div>
+                    <div class="suggestion-chip">Give me a healthy dinner recipe</div>
+                </div>
+            </div>
+
+            <!-- Chat container (hidden initially) -->
+            <div class="chat-container hidden" id="chat-container">
+                <div class="messages-wrapper" id="messages-wrapper">
+                    <!-- Messages will be added here -->
+                </div>
+            </div>
+
+            <!-- Input area -->
+            <div class="input-area">
+                <div class="input-container">
+                    <textarea 
+                        class="message-input" 
+                        id="message-input" 
+                        placeholder="Message Sara..."
+                        rows="1"
+                    ></textarea>
+                    <button class="send-button" id="send-button" disabled>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -604,8 +648,9 @@
         
         // Set on load
         window.addEventListener('load', setMobileHeight);
-        // Update on resize
+        // Update on resize and orientation change
         window.addEventListener('resize', setMobileHeight);
+        window.addEventListener('orientationchange', setMobileHeight);
         
         document.addEventListener('DOMContentLoaded', function() {
             // DOM Elements
@@ -618,13 +663,15 @@
             const messageInput = document.getElementById('message-input');
             const sendButton = document.getElementById('send-button');
             const suggestionChips = document.querySelectorAll('.suggestion-chip');
+            const conversationItems = document.querySelectorAll('.conversation-item');
 
             // Chat management variables
             let loadingResponse = false;
             let chatHistory = [];
 
             // Toggle sidebar on mobile
-            menuButton.addEventListener('click', function() {
+            menuButton.addEventListener('click', function(e) {
+                e.stopPropagation(); // Prevent event from bubbling to document
                 sidebar.classList.toggle('show');
             });
 
@@ -682,6 +729,62 @@
                 }
             });
 
+            // Handle conversation item clicks
+            conversationItems.forEach(item => {
+                item.addEventListener('click', function() {
+                    // Mark this item as active
+                    document.querySelectorAll('.conversation-item').forEach(el => {
+                        el.classList.remove('active');
+                    });
+                    this.classList.add('active');
+                    
+                    // Get the conversation ID
+                    const conversationId = this.getAttribute('data-id');
+                    
+                    // On mobile, hide the sidebar after selection
+                    if (window.innerWidth <= 768) {
+                        sidebar.classList.remove('show');
+                    }
+                    
+                    // Always make sure the chat container is visible and empty state is hidden
+                    emptyState.classList.add('hidden');
+                    chatContainer.classList.remove('hidden');
+                    
+                    // If we have messages in chatHistory, render them
+                    if (chatHistory && chatHistory.length > 0) {
+                        renderMessages();
+                    } else {
+                        // Fetch messages for this conversation if needed
+                        fetch(`/v1/conversations/${conversationId}`)
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.messages && data.messages.length > 0) {
+                                    chatHistory = data.messages;
+                                    renderMessages();
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error fetching conversation:', error);
+                            });
+                    }
+                    
+                    // Force scroll to bottom
+                    setTimeout(() => {
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }, 100);
+                });
+            });
+
+            // Close the sidebar when clicking outside of it on mobile
+            document.addEventListener('click', function(e) {
+                if (window.innerWidth <= 768 && sidebar.classList.contains('show')) {
+                    // Check if the click is outside the sidebar
+                    if (!sidebar.contains(e.target) && e.target !== menuButton) {
+                        sidebar.classList.remove('show');
+                    }
+                }
+            });
+
             // Initialize the chat interface
             initializeChat();
 
@@ -725,6 +828,16 @@
                             chatContainer.classList.add('hidden');
                         });
                 }
+                
+                // Fix initial focus issues on mobile
+                setTimeout(() => {
+                    messageInput.focus();
+                    
+                    // Fix for iOS initial scroll position
+                    if (chatContainer.scrollHeight > chatContainer.clientHeight) {
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }
+                }, 500);
             }
 
             // Function to start a new chat
@@ -745,7 +858,6 @@
             }
 
             // Function to render messages
-            // Enhanced renderMessages function
             function renderMessages() {
                 // Clear current messages
                 const messagesWrapper = document.getElementById('messages-wrapper');
@@ -806,14 +918,14 @@
                 
                 // Prepare the request payload for the standard OpenAI-compatible endpoint
                 const payload = {
-                    model: "gpt-4", // This will be mapped to your local model
+                    model: "gpt-4o", // This will be mapped to your local model
                     messages: [
                         { role: "user", content: message }
                     ],
                     stream: true
                 };
                 
-                // Create the EventSource for streaming
+                // Create the fetch request for streaming
                 fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: {
@@ -902,174 +1014,3 @@
                         addMessageToChat('assistant', errorMsg, true);
                     }
                 });
-            }
-
-            // Add a message to the chat
-            function addMessageToChat(role, content, animate = false) {
-                const messageElement = document.createElement('div');
-                messageElement.className = `chat-message ${role}`;
-                
-                if (animate) {
-                    messageElement.style.opacity = '0';
-                    messageElement.style.transform = 'translateY(10px)';
-                    messageElement.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
-                }
-                
-                const formattedContent = formatMessage(content);
-                
-                messageElement.innerHTML = `
-                    <div class="avatar ${role}">${role === 'user' ? 'U' : 'S'}</div>
-                    <div class="message-content markdown">${formattedContent}</div>
-                `;
-                
-                // Add to the messages wrapper
-                document.getElementById('messages-wrapper').appendChild(messageElement);
-                
-                // Scroll to bottom
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-                
-                // Animate in
-                if (animate) {
-                    setTimeout(() => {
-                        messageElement.style.opacity = '1';
-                        messageElement.style.transform = 'translateY(0)';
-                    }, 10);
-                }
-                
-                return messageElement;
-            }
-
-            // Add loading indicator
-            function addLoadingIndicator() {
-                const loadingElement = document.createElement('div');
-                loadingElement.className = 'chat-message assistant loading';
-                loadingElement.id = 'loading-indicator';
-                loadingElement.innerHTML = `
-                    <div class="avatar assistant">S</div>
-                    <div class="message-content">
-                        <div class="loading-indicator">
-                            <span>Sara is thinking</span>
-                            <div class="loading-dots">
-                                <div class="dot"></div>
-                                <div class="dot"></div>
-                                <div class="dot"></div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                
-                // Add to the messages wrapper
-                document.getElementById('messages-wrapper').appendChild(loadingElement);
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-            }
-
-            // Remove loading indicator
-            function removeLoadingIndicator() {
-                const loadingElement = document.getElementById('loading-indicator');
-                if (loadingElement) {
-                    loadingElement.remove();
-                }
-            }
-
-            // Format message content for display
-            function formatMessage(content) {
-                // Basic markdown formatting
-                let formatted = content
-                    // Code blocks
-                    .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
-                    // Inline code
-                    .replace(/`([^`]+)`/g, '<code>$1</code>')
-                    // Headers
-                    .replace(/^### (.*$)/gm, '<h3>$1</h3>')
-                    .replace(/^## (.*$)/gm, '<h2>$1</h2>')
-                    .replace(/^# (.*$)/gm, '<h1>$1</h1>')
-                    // Bold
-                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                    // Italic
-                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                    // Links
-                    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
-                    // Lists
-                    .replace(/^\s*\d+\.\s+(.*)/gm, '<ol><li>$1</li></ol>')
-                    .replace(/^\s*[\-\*]\s+(.*)/gm, '<ul><li>$1</li></ul>')
-                    // Paragraphs
-                    .replace(/\n\n/g, '</p><p>')
-                    // Line breaks
-                    .replace(/\n/g, '<br>');
-                
-                // Wrap in paragraph if not already
-                if (!formatted.startsWith('<h') && !formatted.startsWith('<p>') && !formatted.startsWith('<ol>') && !formatted.startsWith('<ul>') && !formatted.startsWith('<pre>')) {
-                    formatted = '<p>' + formatted + '</p>';
-                }
-                
-                return formatted;
-            }
-            // Add this code to your existing JavaScript to handle mobile menu properly
-
-// Get all conversation items and add click handlers
-            
-        });
-        const conversationItems = document.querySelectorAll('.conversation-item');
-        conversationItems.forEach(item => {
-            item.addEventListener('click', function() {
-                // Mark this item as active
-                document.querySelectorAll('.conversation-item').forEach(el => {
-                    el.classList.remove('active');
-                });
-                this.classList.add('active');
-                
-                // Get the conversation ID
-                const conversationId = this.getAttribute('data-id');
-                
-                // On mobile, hide the sidebar after selection
-                if (window.innerWidth <= 768) {
-                    sidebar.classList.remove('show');
-                }
-                
-                // Always make sure the chat container is visible and empty state is hidden
-                emptyState.classList.add('hidden');
-                chatContainer.classList.remove('hidden');
-                
-                // If we have messages in chatHistory, render them
-                if (chatHistory && chatHistory.length > 0) {
-                    renderMessages();
-                } else {
-                    // Fetch messages for this conversation if needed
-                    fetch(`/v1/conversations/${conversationId}`)
-                        .then(response => response.json())
-                        .then(data => {
-                            if (data.messages && data.messages.length > 0) {
-                                chatHistory = data.messages;
-                                renderMessages();
-                            }
-                        })
-                        .catch(error => {
-                            console.error('Error fetching conversation:', error);
-                        });
-                }
-                
-                // Force scroll to bottom
-                setTimeout(() => {
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
-                }, 100);
-            });
-        });
-
-        // Improve the menu button toggle to ensure it works properly
-        menuButton.addEventListener('click', function(e) {
-            e.stopPropagation(); // Prevent event from bubbling to document
-            sidebar.classList.toggle('show');
-        });
-
-        // Close the sidebar when clicking outside of it on mobile
-        document.addEventListener('click', function(e) {
-            if (window.innerWidth <= 768 && sidebar.classList.contains('show')) {
-                // Check if the click is outside the sidebar
-                if (!sidebar.contains(e.target) && e.target !== menuButton) {
-                    sidebar.classList.remove('show');
-                }
-            }
-        });
-    </script>
-</body>
-</html>

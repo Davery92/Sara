@@ -81,6 +81,8 @@ MODEL_MAPPING = {
     "gpt-3.5-turbo": "mistral-small",
     "gpt-3.5-turbo-0125": "command-r7b",
     "gpt-3.5-turbo-1106": "llama3.2",
+    "gpt-4o-mini": "llama3.1",
+    "gpt-4o": "qwen2.5:14b",
     # Add more mappings as needed
     "default": "llama3.3"
 }
@@ -101,7 +103,8 @@ MODEL_URLS = {
     "llama3.1": "http://localhost:11434/api/chat",
     "mistral-small": "http://localhost:11434/api/chat",
     "command-r7b": "http://localhost:11434/api/chat",
-    "default": "http://localhost:11434/api/chat"
+    "default": "http://localhost:11434/api/chat",
+    "qwen2.5:14b": "http://localhost:11434/api/chat"
 }
 
 
@@ -1410,7 +1413,7 @@ TOOL_DEFINITIONS = [
         'type': 'function',
         'function': {
             'name': 'send_message',
-            'description': 'Think about a response to the user. Use this tool to think about what the user said and the conversation context before formulating your response. An example would be "the user is saying good morning, I should respond in a cute funny manner" or "the user seems to be struggling with something, I should try and cheer him up". ',
+            'description': 'Use this tool to think about what the user said and the conversation context before formulating your response. An example would be "the user is saying good morning, I should respond in a cute funny manner" or "the user seems to be struggling with something, I should try and cheer him up". ',
             'parameters': {
                 'type': 'object',
                 'required': ['message'],
@@ -1782,19 +1785,13 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
             logger.info(f"Adding default tools to streaming request")
             data['tools'] = TOOL_DEFINITIONS
         try:
-            # Pretty print the request data to see exactly what's being sent
-            import json
-            #logger.info(f"JSON request data: {json.dumps(data, indent=2)}")
-            
             # Make sure tools are properly serializable
             json.dumps(data['tools'])  # This will raise an error if there's an issue
         except Exception as e:
             logger.error(f"Error in request data formatting: {str(e)}")
-            # You might want to still try the request, but with simpler tools
+            # Try with simplified tools if there's an error
             if 'tools' in data:
-                # Try with simplified tools if there's an error
                 data['tools'] = data['tools'][:3]  # Just use the first 3 tools as a test
-
 
         # Get the appropriate URL based on the model
         url = MODEL_URLS.get(local_model, MODEL_URLS["default"])
@@ -1819,7 +1816,8 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                         response_data = json.loads(chunk_str)
                         logger.debug(f"Received chunk: {chunk_str}")
                         
-                        # Process tool calls if present
+                                                        # Handle different types of responses
+                        # Case 1: Tool calls in the response
                         if 'message' in response_data and 'tool_calls' in response_data['message']:
                             logger.info(f"Tool call detected in response")
                             tool_outputs = await process_tool_calls(response_data)
@@ -1827,39 +1825,62 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                             if tool_outputs:
                                 logger.info(f"Processed tool outputs: {tool_outputs}")
                                 
-                                # Add tool outputs to conversation history
-                                for tool_output in tool_outputs:
-                                    messages.append(tool_output)
-                                
-                                # Create a combined tool results message for the assistant
-                                tool_results = "\n\n".join([
-                                    f"Tool: {output['name']}\nResult: {output['content']}"
-                                    for output in tool_outputs
-                                ])
-                                
-                                # Add a special system message for tool results
-                                tool_system_message = {
-                                    'role': 'system',
-                                    'content': f"The following is information obtained by the tool call, use this in your response: {tool_results}. If a detailed report or analysis is provided, reword the response to fit the users query."
-                                }
-                                
-                                # Create a new messages array with original messages and the tool system message
-                                follow_up_messages = messages.copy()
-                                # Insert the tool system message before the last user message
-                                for i in range(len(follow_up_messages) - 1, -1, -1):
-                                    if follow_up_messages[i]['role'] == 'user':
-                                        follow_up_messages.insert(i + 1, tool_system_message)
+                                # Find the last user message
+                                last_user_message = None
+                                for i in range(len(messages) - 1, -1, -1):
+                                    if messages[i]['role'] == 'user':
+                                        last_user_message = messages[i]
                                         break
                                 
-                                # Send a follow-up request with the tool outputs and special system message
+                                if not last_user_message:
+                                    logger.warning("No user message found in history to use for follow-up")
+                                    # Use a default message if none found
+                                    last_user_message = {'role': 'user', 'content': 'Please continue based on the tool results.'}
+                                
+                                # Create a new messages array for follow-up
+                                follow_up_messages = []
+                                
+                                # Check if any of the tool calls was 'send_message'
+                                send_message_tool_used = False
+                                for tool_output in tool_outputs:
+                                    if tool_output.get('name') == 'send_message':
+                                        send_message_tool_used = True
+                                        break
+                                
+                                # If send_message tool was used, use the original messages up to the user message
+                                if send_message_tool_used:
+                                    logger.info("send_message tool detected - using original user message for follow-up")
+                                    
+                                    # Add all messages up to and including the last user message
+                                    user_message_found = False
+                                    for msg in messages:
+                                        follow_up_messages.append(msg)
+                                        
+                                        # If we've just added the last user message, stop here
+                                        if msg['role'] == 'user' and msg == last_user_message:
+                                            user_message_found = True
+                                            break
+                                    
+                                    # Fallback if user message not found
+                                    if not user_message_found:
+                                        follow_up_messages = messages.copy()
+                                else:
+                                    # For other tools, add all original messages plus tool outputs
+                                    follow_up_messages = messages.copy()
+                                    # Add tool outputs to conversation history if not using send_message
+                                    for tool_output in tool_outputs:
+                                        follow_up_messages.append(tool_output)
+                                
+                                # Send a follow-up request
                                 follow_up_data = {
                                     'model': local_model,
                                     'messages': follow_up_messages,
                                     'stream': True
                                 }
                                 
-                                logger.info(f"Sending follow-up request with tool outputs and system message")
+                                logger.info(f"Sending follow-up request after tool calls")
                                 async with session.post(url, json=follow_up_data) as follow_up_response:
+                                    follow_up_response.raise_for_status()
                                     async for follow_up_chunk in follow_up_response.content:
                                         if not follow_up_chunk:
                                             continue
@@ -1870,8 +1891,32 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                             else:
                                 # No tool outputs, just yield the chunk
                                 yield format_sse_message(chunk_str)
+                        
+                        # Case 2: Direct text response (non-tool response)
+                        elif 'message' in response_data and 'content' in response_data['message']:
+                            logger.info("Regular message response detected - sending follow-up request for consistency")
+                            
+                            # Use the same approach as with tool calls for consistency:
+                            # Make a new request with the same messages for proper streaming
+                            follow_up_data = {
+                                'model': local_model,
+                                'messages': messages,
+                                'stream': True
+                            }
+                            
+                            async with session.post(url, json=follow_up_data) as follow_up_response:
+                                follow_up_response.raise_for_status()
+                                async for follow_up_chunk in follow_up_response.content:
+                                    if not follow_up_chunk:
+                                        continue
+                                    
+                                    follow_up_str = follow_up_chunk.decode('utf-8').strip()
+                                    if follow_up_str:
+                                        yield format_sse_message(follow_up_str)
+                        
+                        # Case 3: Other response formats (including 'done' messages)
                         else:
-                            # For non-tool responses, yield the chunk in SSE format
+                            # For other response formats, just yield the chunk
                             yield format_sse_message(chunk_str)
                             
                     except json.JSONDecodeError:
