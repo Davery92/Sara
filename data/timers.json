@@ -1,1 +1,18 @@
-{}
+{
+  "e98261b4-7ab7-4673-9470-eedf7b253aa0": {
+    "id": "e98261b4-7ab7-4673-9470-eedf7b253aa0",
+    "type": "timer",
+    "duration": 600,
+    "message": "Timer complete!",
+    "title": "10 Minute Timer",
+    "priority": 3,
+    "tags": [
+      "clock",
+      "timer"
+    ],
+    "created_at": "2025-03-04T13:47:02.154784",
+    "scheduled_time": "2025-03-04T13:57:02.154776",
+    "status": "completed",
+    "completed_at": "2025-03-04T13:57:01.925965"
+  }
+}
