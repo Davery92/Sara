@@ -33,7 +33,7 @@ from modules.rag_integration import integrate_rag_with_server, update_system_pro
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
-
+from fastapi.responses import FileResponse
 
 
 # Initialize the message store with Neo4j backend
@@ -64,7 +64,7 @@ app.add_middleware(
 NOTES_DIRECTORY = "/home/david/Sara/notes"
 
 MESSAGE_HISTORY = []
-MAX_HISTORY = 10  # Maximum number of messages (excluding system prompt)
+MAX_HISTORY = 15  # Maximum number of messages (excluding system prompt)
 
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
@@ -199,67 +199,108 @@ class RedisClient:
         return message_id
     
     def get_messages_by_conversation(self, conversation_id, limit=100):
-        """Retrieve all messages for a specific conversation, ordered by timestamp"""
+        """Get messages for a conversation (improved implementation with better error handling)"""
         try:
-            # Get all message keys for this conversation
-            raw_keys = self.message_store.keys(f"message:{conversation_id}:*")
+            # Use pattern matching to find all messages for this conversation
+            pattern = f"message:{conversation_id}:*"
+            message_keys = self.redis_client.keys(pattern)
             
-            # Filter out embedding keys
-            message_keys = []
-            for key in raw_keys:
-                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
-                # Skip embedding keys
-                if not key_str.endswith(":embedding"):
-                    message_keys.append(key_str)
-            
-            if not message_keys:
-                return []
+            # Skip embedding keys
+            filtered_keys = []
+            for key in message_keys:
+                # Skip embedding-related keys
+                if isinstance(key, bytes):
+                    key_str = key.decode('utf-8', errors='ignore')
+                    if not key_str.endswith(":embedding"):
+                        filtered_keys.append(key)
+                elif not key.endswith(":embedding"):
+                    filtered_keys.append(key)
             
             messages = []
-            for key in message_keys:
+            for key in filtered_keys[:limit]:
                 try:
-                    # Try to get JSON data safely
-                    try:
-                        json_data = self.message_store.json().get(key)
-                        
-                        if json_data and isinstance(json_data, dict):
-                            # Extract just the data we need
+                    # Try to get the data, handling different Redis data types
+                    key_type = self.redis_client.type(key)
+                    
+                    if key_type == "hash":
+                        # For hash data, get all fields with proper error handling
+                        raw_data = self.redis_client.hgetall(key)
+                        if raw_data:
+                            message_data = {}
+                            for field, value in raw_data.items():
+                                # Safely decode field names
+                                field_name = field.decode('utf-8', errors='ignore') if isinstance(field, bytes) else field
+                                
+                                # Handle binary data in values
+                                if isinstance(value, bytes):
+                                    try:
+                                        # Try to decode, but ignore errors
+                                        decoded_value = value.decode('utf-8', errors='ignore')
+                                        message_data[field_name] = decoded_value
+                                    except Exception:
+                                        # If decoding fails entirely, store as a placeholder
+                                        message_data[field_name] = "(binary data)"
+                                else:
+                                    message_data[field_name] = value
+                            
+                            # Extract role and content for the message format
                             messages.append({
-                                "role": json_data.get("role", "unknown"),
-                                "content": json_data.get("content", ""),
-                                "timestamp": json_data.get("timestamp", 0)
+                                "role": message_data.get("role", "unknown"),
+                                "content": message_data.get("content", ""),
+                                "timestamp": int(message_data.get("timestamp", 0)) if message_data.get("timestamp", "").isdigit() else 0
                             })
-                    except Exception as json_err:
-                        logger.warning(f"Error getting JSON for key {key}: {json_err}")
-                        # Try alternative retrieval method
+                    
+                    elif key_type == "ReJSON-RL" or key_type == "JSON":
+                        # For JSON data
                         try:
-                            raw_data = self.message_store.get(key)
-                            if raw_data and isinstance(raw_data, bytes):
-                                try:
-                                    # Try to decode and parse as JSON
-                                    json_str = raw_data.decode('utf-8')
-                                    json_data = json.loads(json_str)
+                            json_data = self.redis_client.json().get(key)
+                            if json_data and isinstance(json_data, dict):
+                                messages.append({
+                                    "role": json_data.get("role", "unknown"),
+                                    "content": json_data.get("content", ""),
+                                    "timestamp": int(json_data.get("timestamp", 0)) if isinstance(json_data.get("timestamp", ""), str) and json_data.get("timestamp", "").isdigit() else 0
+                                })
+                        except Exception as json_err:
+                            print(f"Error getting JSON for key {key}: {json_err}")
+                    
+                    elif key_type == "string":
+                        # For string data, try to parse as JSON
+                        try:
+                            string_value = self.redis_client.get(key)
+                            if isinstance(string_value, bytes):
+                                string_value = string_value.decode('utf-8', errors='ignore')
+                                
+                            # Try to parse as JSON
+                            import json
+                            try:
+                                parsed_data = json.loads(string_value)
+                                if isinstance(parsed_data, dict):
                                     messages.append({
-                                        "role": json_data.get("role", "unknown"),
-                                        "content": json_data.get("content", ""),
-                                        "timestamp": json_data.get("timestamp", 0)
+                                        "role": parsed_data.get("role", "unknown"),
+                                        "content": parsed_data.get("content", ""),
+                                        "timestamp": int(parsed_data.get("timestamp", 0)) if isinstance(parsed_data.get("timestamp", ""), str) and parsed_data.get("timestamp", "").isdigit() else 0
                                     })
-                                except (UnicodeDecodeError, json.JSONDecodeError):
-                                    # Not valid UTF-8 or JSON, skip this
-                                    continue
-                        except Exception:
-                            # Skip this message
-                            continue
+                            except json.JSONDecodeError:
+                                # Not JSON, just use as raw content
+                                messages.append({
+                                    "role": "unknown",
+                                    "content": string_value,
+                                    "timestamp": 0
+                                })
+                        except Exception as str_err:
+                            print(f"Error processing string for key {key}: {str_err}")
+                    
                 except Exception as e:
-                    logger.warning(f"Error processing message for key {key}: {e}")
+                    print(f"Error processing message key {key}: {e}")
                     continue
-            
+                    
             # Sort messages by timestamp
             messages.sort(key=lambda x: x.get("timestamp", 0))
             
             return messages
+                
         except Exception as e:
-            logger.error(f"Error retrieving messages: {str(e)}")
+            print(f"Error retrieving messages: {e}")
             return []
     
     def vector_search(self, embedding, k=3):
@@ -340,9 +381,16 @@ async def startup_event():
 
 @app.get("/v1/conversations")
 async def list_conversations(limit: int = 20, offset: int = 0):
-    """List all conversations"""
+    """List all conversations with additional metadata"""
     try:
         conversations = message_store.list_conversations(limit=limit, offset=offset)
+        
+        # Add additional formatting if needed
+        for conv in conversations:
+            # Truncate long messages for preview
+            if "last_message" in conv and conv["last_message"]:
+                conv["last_message"] = conv["last_message"][:50] + "..." if len(conv["last_message"]) > 50 else conv["last_message"]
+        
         return {"conversations": conversations}
     except Exception as e:
         logger.error(f"Error listing conversations: {e}")
@@ -446,6 +494,28 @@ async def get_user_profile(user_id: str):
     if "error" in profile:
         return {"profile": "No profile information available"}
     return {"profile": profile}
+
+@app.get("/chat", response_class=FileResponse)
+async def chat_interface():
+    """Serve the chat interface"""
+    chat_html_path = "/home/david/Sara/static/chat.html"
+    return FileResponse(chat_html_path)
+
+
+@app.get("/")
+async def redirect_to_chat():
+    """Redirect root to chat interface"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/chat")
+
+# Add this to your server.py - a new endpoint for the chat interface
+@app.get("/v1/chat/current-session")
+async def get_current_session():
+    """Return just the current chat session data"""
+    return {
+        "conversation_id": "current_session",
+        "messages": current_chat  # Using your existing current_chat variable
+    }
 
 def add_message_to_history(role, content):
     """
@@ -768,7 +838,7 @@ def get_core_memory_stats() -> Dict[str, Any]:
         }
 
 class ConversationBuffer:
-    def __init__(self, max_buffer_size=10):
+    def __init__(self, max_buffer_size=15):
         self.buffer = {}  # Dictionary of conversation_id -> list of messages
         self.max_buffer_size = max_buffer_size
         self.summarization_tasks = set()  # Track ongoing summarization tasks
@@ -977,7 +1047,7 @@ def add_message_to_conversation(conversation_id, role, content):
         )
         
         # If we now have more than 10 messages, remove the oldest one
-        if len(current_messages) >= 10:
+        if len(current_messages) >= 15:
             logger.info(f"Conversation {conversation_id} has reached the 10-message limit, removing oldest")
             
             # Sort messages by timestamp
@@ -1856,7 +1926,7 @@ async def fetch_ollama_response(messages, model, tools=None):
             raise HTTPException(status_code=500, detail=error_msg)
 
 # Define a new function to manage the conversation window
-def manage_conversation_window(conversation_id, max_history=10):
+def manage_conversation_window(conversation_id, max_history=15):
     """
     Retrieve the last N messages from a conversation to use as context.
     If there are more than max_history messages, oldest messages will be excluded.
@@ -2006,6 +2076,9 @@ class EmbeddingRequest(BaseModel):
     dimensions: Optional[int] = None
     user: Optional[str] = None
 
+
+
+
 # OpenAI API Compatible Endpoints
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
@@ -2115,6 +2188,41 @@ async def chat_completions(request: ChatCompletionRequest):
         except Exception as e:
             logger.error(f"Error in completion: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error in completion: {str(e)}")
+
+
+@app.get("/v1/chat/stream")
+async def stream_chat_for_interface(message: str = None):
+    """Specialized streaming endpoint for the chat interface"""
+    try:
+        # Check if message is provided
+        if not message:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Message is required"}
+            )
+            
+        # Get system prompt
+        system_message = {'role': 'system', 'content': SYSTEM_PROMPT}
+        
+        # Prepare messages for the model (just system prompt + user message)
+        model_messages = [system_message, {'role': 'user', 'content': message}]
+        
+        # Set up streaming response
+        async def stream_response():
+            async for chunk in send_to_ollama_api(model_messages, "llama3.3", TOOL_DEFINITIONS, stream=True):
+                yield chunk
+        
+        return StreamingResponse(
+            stream_response(),
+            media_type="text/event-stream"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in stream_chat_for_interface: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Error generating response: {str(e)}"}
+        )
 
 @app.post("/v1/embeddings")
 async def create_embeddings(request: EmbeddingRequest):
@@ -2266,7 +2374,7 @@ async def debug_messages(conversation_id: str):
                 "status": "error",
                 "message": f"Error retrieving messages: {str(e)}",
                 "direct_keys_count": len(direct_keys),
-                "direct_keys_sample": [k for k in direct_keys[:10]],
+                "direct_keys_sample": [k for k in direct_keys[:5]],
                 "sample_data": sample_data
             }
         
@@ -2275,7 +2383,7 @@ async def debug_messages(conversation_id: str):
             "message_count": len(messages),
             "messages": messages[:5],  # Return first 5 messages
             "direct_keys_count": len(direct_keys),
-            "direct_keys_sample": [k for k in direct_keys[:10]],
+            "direct_keys_sample": [k for k in direct_keys[:15]],
             "sample_data": sample_data
         }
     except Exception as e:
