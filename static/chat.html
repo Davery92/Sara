@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sara AI Assistant</title>
     <style>
         :root {
@@ -32,17 +32,9 @@
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
             background-color: var(--bg-color);
             color: var(--text-color);
-            height: 100%;
-            /* Remove position: fixed that prevents scrolling */
-            position: relative;
-            width: 100%;
-            overflow-x: hidden;
-        }
-
-        .app-container {
-            display: flex;
             height: 100vh;
-            height: calc(var(--vh, 1vh) * 100);
+            display: flex;
+            overflow: hidden;
         }
 
         .sidebar {
@@ -54,6 +46,7 @@
             border-right: 1px solid var(--border-color);
             transition: transform 0.3s ease;
             overflow-y: auto;
+            flex-shrink: 0;
             z-index: 100;
         }
 
@@ -149,9 +142,10 @@
             flex: 1;
             display: flex;
             flex-direction: column;
-            height: 100%;
+            height: 100vh;
+            max-height: 100vh;
             position: relative;
-            overflow: hidden; /* Prevent horizontal scroll */
+            overflow: hidden;
         }
 
         .menu-button {
@@ -186,21 +180,21 @@
             font-weight: 600;
         }
 
+        /* CRITICAL CHANGE: Fixed layout for proper message display */
         .chat-container {
-            flex: 1;
-            overflow-y: auto;
-            -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
-            padding: 24px 0;
-            scroll-behavior: smooth;
-            display: flex;
-            flex-direction: column;
+            flex: 1; /* Take remaining space */
+            overflow-y: auto; /* Allow vertical scrolling */
+            position: relative; /* For proper sizing */
+            display: flex; /* For flex layout */
+            flex-direction: column; /* Vertical layout */
+            min-height: 0; /* Critical for Firefox flex container to allow scrolling */
         }
         
         .messages-wrapper {
+            flex-grow: 1; /* Allow growth */
             display: flex;
             flex-direction: column;
-            min-height: 100%;
-            justify-content: flex-end;
+            padding: 24px 0 84px 0; /* Added bottom padding to prevent content from being hidden behind input area */
         }
 
         .chat-message {
@@ -208,6 +202,7 @@
             padding: 16px 48px;
             gap: 16px;
             border-bottom: 1px solid var(--border-color);
+            width: 100%; /* Ensure messages take full width */
         }
 
         .chat-message.user {
@@ -272,8 +267,9 @@
             border-top: 1px solid var(--border-color);
             padding: 16px;
             position: relative;
-            flex-shrink: 0;
-            background-color: var(--bg-color);
+            flex-shrink: 0; /* Prevent input area from shrinking */
+            background-color: var(--bg-color); /* Ensure background color */
+            margin-top: auto; /* Push to the bottom */
         }
 
         .input-container {
@@ -342,10 +338,10 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            height: 100%;
+            flex: 1;
             padding: 0 24px;
             text-align: center;
-            flex: 1;
+            margin-bottom: 80px; /* Make room for input area */
         }
 
         .empty-state-icon {
@@ -479,7 +475,6 @@
                 z-index: 100;
                 height: 100%;
                 transform: translateX(-100%);
-                box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
             }
 
             .sidebar.show {
@@ -496,16 +491,13 @@
             
             /* Ensure input area is visible and properly sized */
             .input-area {
-                position: sticky;
+                position: fixed;
                 bottom: 0;
+                left: 0;
+                right: 0;
                 background-color: var(--bg-color);
                 z-index: 10;
                 padding: 12px 8px;
-            }
-            
-            /* Make chat container leave space for input */
-            .chat-container {
-                padding-bottom: 16px;
             }
             
             /* Adjust margins on input to use space better */
@@ -513,145 +505,108 @@
                 margin: 0 4px;
             }
             
-            /* Reduce padding on empty state for mobile */
-            .empty-state {
-                padding: 16px;
-            }
-            
-            /* Make suggestion chips smaller on mobile */
-            .suggestion-chip {
-                padding: 6px 12px;
-                font-size: 13px;
-            }
-        }
-        
-        /* iOS-specific fixes */
-        @supports (-webkit-touch-callout: none) {
-            body {
-                /* Prevent overscroll effects */
-                overflow: hidden;
-            }
-            
-            .app-container {
-                /* Enable scrolling within the container */
-                overflow: auto;
-                -webkit-overflow-scrolling: touch;
-            }
-            
-            .chat-container {
-                /* Ensure iOS momentum scrolling works */
-                -webkit-overflow-scrolling: touch;
+            /* Add more padding on mobile to account for the fixed input area */
+            .messages-wrapper {
+                padding-bottom: 100px;
             }
         }
     </style>
 </head>
 <body>
-    <div class="app-container">
-        <!-- Sidebar -->
-        <div class="sidebar" id="sidebar">
-            <button class="new-chat-btn" id="new-chat-btn">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="12" y1="5" x2="12" y2="19"></line>
-                    <line x1="5" y1="12" x2="19" y2="12"></line>
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+        <button class="new-chat-btn" id="new-chat-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            New Chat
+        </button>
+
+        <div class="conversation-list" id="conversation-list">
+            <!-- Simplified - we only show one conversation -->
+            <div class="conversation-item active" data-id="current_session">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="conversation-item-icon">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                 </svg>
-                New Chat
-            </button>
-
-            <div class="conversation-list" id="conversation-list">
-                <!-- Simplified - we only show one conversation -->
-                <div class="conversation-item active" data-id="current_session">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="conversation-item-icon">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                    </svg>
-                    <span class="conversation-item-text">Current Conversation</span>
-                </div>
-            </div>
-
-            <div class="sidebar-footer">
-                <button class="sidebar-footer-button" id="clear-chat">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M3 6h18"></path>
-                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
-                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
-                    </svg>
-                    Clear chat
-                </button>
+                <span class="conversation-item-text">Current Conversation</span>
             </div>
         </div>
 
-        <!-- Main Content -->
-        <div class="main-content">
-            <button class="menu-button" id="menu-button">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="3" y1="12" x2="21" y2="12"></line>
-                    <line x1="3" y1="6" x2="21" y2="6"></line>
-                    <line x1="3" y1="18" x2="21" y2="18"></line>
+        <div class="sidebar-footer">
+            <button class="sidebar-footer-button" id="clear-chat">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 6h18"></path>
+                    <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                    <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
                 </svg>
+                Clear chat
             </button>
+        </div>
+    </div>
 
-            <div class="chat-header">
-                <h1>Sara AI Assistant</h1>
+    <!-- Main Content -->
+    <div class="main-content">
+        <button class="menu-button" id="menu-button">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
+            </svg>
+        </button>
+
+        <div class="chat-header">
+            <h1>Sara AI Assistant</h1>
+        </div>
+
+        <!-- Empty state (shown when no conversation is active) -->
+        <div class="empty-state" id="empty-state">
+            <div class="empty-state-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M8 12h8"></path>
+                    <path d="M12 8v8"></path>
+                </svg>
             </div>
+            <h2>How can I help you today?</h2>
+            <p>Type a message to start a conversation, or try one of these suggestions:</p>
+            <div class="suggestion-chips">
+                <div class="suggestion-chip">Explain quantum computing</div>
+                <div class="suggestion-chip">Write a short story about time travel</div>
+                <div class="suggestion-chip">Help me plan a vacation</div>
+                <div class="suggestion-chip">Give me a healthy dinner recipe</div>
+            </div>
+        </div>
 
-            <!-- Empty state (shown when no conversation is active) -->
-            <div class="empty-state" id="empty-state">
-                <div class="empty-state-icon">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="12" cy="12" r="10"></circle>
-                        <path d="M8 12h8"></path>
-                        <path d="M12 8v8"></path>
+        <!-- Chat container (hidden initially) -->
+        <div class="chat-container hidden" id="chat-container">
+            <div class="messages-wrapper" id="messages-wrapper">
+                <!-- Messages will be added here -->
+            </div>
+        </div>
+
+        <!-- Input area - fixed at bottom -->
+        <div class="input-area">
+            <div class="input-container">
+                <textarea 
+                    class="message-input" 
+                    id="message-input" 
+                    placeholder="Message Sara..."
+                    rows="1"
+                ></textarea>
+                <button class="send-button" id="send-button" disabled>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                     </svg>
-                </div>
-                <h2>How can I help you today?</h2>
-                <p>Type a message to start a conversation, or try one of these suggestions:</p>
-                <div class="suggestion-chips">
-                    <div class="suggestion-chip">Explain quantum computing</div>
-                    <div class="suggestion-chip">Write a short story about time travel</div>
-                    <div class="suggestion-chip">Help me plan a vacation</div>
-                    <div class="suggestion-chip">Give me a healthy dinner recipe</div>
-                </div>
-            </div>
-
-            <!-- Chat container (hidden initially) -->
-            <div class="chat-container hidden" id="chat-container">
-                <div class="messages-wrapper" id="messages-wrapper">
-                    <!-- Messages will be added here -->
-                </div>
-            </div>
-
-            <!-- Input area -->
-            <div class="input-area">
-                <div class="input-container">
-                    <textarea 
-                        class="message-input" 
-                        id="message-input" 
-                        placeholder="Message Sara..."
-                        rows="1"
-                    ></textarea>
-                    <button class="send-button" id="send-button" disabled>
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="22" y1="2" x2="11" y2="13"></line>
-                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                        </svg>
-                    </button>
-                </div>
+                </button>
             </div>
         </div>
     </div>
 
     <script>
-        // Fix for mobile viewport height issues
-        function setMobileHeight() {
-            const vh = window.innerHeight * 0.01;
-            document.documentElement.style.setProperty('--vh', `${vh}px`);
-        }
-        
-        // Set on load
-        window.addEventListener('load', setMobileHeight);
-        // Update on resize and orientation change
-        window.addEventListener('resize', setMobileHeight);
-        window.addEventListener('orientationchange', setMobileHeight);
-        
+        // All the JavaScript code would go here
+        // (I've left it out for brevity, but it would be the same as the fixed JS code)
         document.addEventListener('DOMContentLoaded', function() {
             // DOM Elements
             const sidebar = document.getElementById('sidebar');
@@ -663,15 +618,13 @@
             const messageInput = document.getElementById('message-input');
             const sendButton = document.getElementById('send-button');
             const suggestionChips = document.querySelectorAll('.suggestion-chip');
-            const conversationItems = document.querySelectorAll('.conversation-item');
 
             // Chat management variables
             let loadingResponse = false;
             let chatHistory = [];
 
             // Toggle sidebar on mobile
-            menuButton.addEventListener('click', function(e) {
-                e.stopPropagation(); // Prevent event from bubbling to document
+            menuButton.addEventListener('click', function() {
                 sidebar.classList.toggle('show');
             });
 
@@ -729,62 +682,6 @@
                 }
             });
 
-            // Handle conversation item clicks
-            conversationItems.forEach(item => {
-                item.addEventListener('click', function() {
-                    // Mark this item as active
-                    document.querySelectorAll('.conversation-item').forEach(el => {
-                        el.classList.remove('active');
-                    });
-                    this.classList.add('active');
-                    
-                    // Get the conversation ID
-                    const conversationId = this.getAttribute('data-id');
-                    
-                    // On mobile, hide the sidebar after selection
-                    if (window.innerWidth <= 768) {
-                        sidebar.classList.remove('show');
-                    }
-                    
-                    // Always make sure the chat container is visible and empty state is hidden
-                    emptyState.classList.add('hidden');
-                    chatContainer.classList.remove('hidden');
-                    
-                    // If we have messages in chatHistory, render them
-                    if (chatHistory && chatHistory.length > 0) {
-                        renderMessages();
-                    } else {
-                        // Fetch messages for this conversation if needed
-                        fetch(`/v1/conversations/${conversationId}`)
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.messages && data.messages.length > 0) {
-                                    chatHistory = data.messages;
-                                    renderMessages();
-                                }
-                            })
-                            .catch(error => {
-                                console.error('Error fetching conversation:', error);
-                            });
-                    }
-                    
-                    // Force scroll to bottom
-                    setTimeout(() => {
-                        chatContainer.scrollTop = chatContainer.scrollHeight;
-                    }, 100);
-                });
-            });
-
-            // Close the sidebar when clicking outside of it on mobile
-            document.addEventListener('click', function(e) {
-                if (window.innerWidth <= 768 && sidebar.classList.contains('show')) {
-                    // Check if the click is outside the sidebar
-                    if (!sidebar.contains(e.target) && e.target !== menuButton) {
-                        sidebar.classList.remove('show');
-                    }
-                }
-            });
-
             // Initialize the chat interface
             initializeChat();
 
@@ -828,16 +725,6 @@
                             chatContainer.classList.add('hidden');
                         });
                 }
-                
-                // Fix initial focus issues on mobile
-                setTimeout(() => {
-                    messageInput.focus();
-                    
-                    // Fix for iOS initial scroll position
-                    if (chatContainer.scrollHeight > chatContainer.clientHeight) {
-                        chatContainer.scrollTop = chatContainer.scrollHeight;
-                    }
-                }, 500);
             }
 
             // Function to start a new chat
@@ -855,6 +742,36 @@
                 
                 // Focus the input
                 messageInput.focus();
+            }
+
+            // Function to fix scrolling issues
+            function fixScrolling() {
+                // Force scroll to bottom with delay to ensure DOM is updated
+                setTimeout(() => {
+                    // Check if chat container is visible first
+                    if (!chatContainer.classList.contains('hidden')) {
+                        console.log('Scrolling to bottom, height:', chatContainer.scrollHeight);
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }
+                }, 100);
+
+                // Add another delayed scroll to handle any late rendering
+                setTimeout(() => {
+                    if (!chatContainer.classList.contains('hidden')) {
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }
+                }, 300);
+
+                // Add a third scroll attempt for good measure
+                setTimeout(() => {
+                    if (!chatContainer.classList.contains('hidden')) {
+                        // Try a different approach if scrolling is still not working
+                        chatContainer.scrollTo({
+                            top: chatContainer.scrollHeight,
+                            behavior: 'smooth'
+                        });
+                    }
+                }, 500);
             }
 
             // Function to render messages
@@ -889,8 +806,8 @@
                 emptyState.classList.add('hidden');
                 chatContainer.classList.remove('hidden');
                 
-                // Scroll to bottom
-                chatContainer.scrollTop = chatContainer.scrollHeight;
+                // Fix scrolling issues
+                fixScrolling();
                 
                 console.log('Messages rendered successfully');
             }
@@ -916,6 +833,9 @@
                 loadingResponse = true;
                 addLoadingIndicator();
                 
+                // Fix scrolling after adding user message
+                fixScrolling();
+                
                 // Prepare the request payload for the standard OpenAI-compatible endpoint
                 const payload = {
                     model: "gpt-4o", // This will be mapped to your local model
@@ -925,7 +845,7 @@
                     stream: true
                 };
                 
-                // Create the fetch request for streaming
+                // Create the EventSource for streaming
                 fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: {
@@ -980,8 +900,8 @@
                                             // Process markdown (simplified for this example)
                                             contentElement.innerHTML = formatMessage(assistantResponse);
                                             
-                                            // Scroll to bottom
-                                            chatContainer.scrollTop = chatContainer.scrollHeight;
+                                            // Fix scrolling with each update
+                                            fixScrolling();
                                         }
                                     }
                                     
@@ -1014,3 +934,125 @@
                         addMessageToChat('assistant', errorMsg, true);
                     }
                 });
+                
+                // Update chat history with the new user message
+                chatHistory.push({ role: 'user', content: message });
+            }
+
+            // Function to add a message to the chat
+            function addMessageToChat(role, content, isNew = false) {
+                // Create message element
+                const messageElement = document.createElement('div');
+                messageElement.className = `chat-message ${role}`;
+                
+                // Create avatar
+                const avatar = document.createElement('div');
+                avatar.className = `avatar ${role}`;
+                
+                // Set avatar content (first letter of role)
+                avatar.textContent = role === 'user' ? 'U' : 'S'; // U for User, S for Sara
+                
+                // Create message content container
+                const messageContent = document.createElement('div');
+                messageContent.className = 'message-content markdown';
+                
+                // Format the message content (handle markdown, code blocks, etc.)
+                messageContent.innerHTML = formatMessage(content);
+                
+                // Append avatar and content to message
+                messageElement.appendChild(avatar);
+                messageElement.appendChild(messageContent);
+                
+                // Append message to chat container
+                document.getElementById('messages-wrapper').appendChild(messageElement);
+                
+                // Update chat history if this is a new message
+                if (isNew && role === 'assistant') {
+                    chatHistory.push({ role: 'assistant', content: content });
+                }
+                
+                // Fix scrolling
+                fixScrolling();
+                
+                // Return the message element (useful for streaming updates)
+                return messageElement;
+            }
+
+            // Function to add loading indicator
+            function addLoadingIndicator() {
+                const loadingElement = document.createElement('div');
+                loadingElement.className = 'chat-message assistant loading';
+                loadingElement.id = 'loading-indicator';
+                
+                const avatar = document.createElement('div');
+                avatar.className = 'avatar assistant';
+                avatar.textContent = 'S';
+                
+                const loadingContent = document.createElement('div');
+                loadingContent.className = 'loading-indicator';
+                loadingContent.innerHTML = `
+                    <span>Sara is thinking</span>
+                    <div class="loading-dots">
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                    </div>
+                `;
+                
+                loadingElement.appendChild(avatar);
+                loadingElement.appendChild(loadingContent);
+                
+                document.getElementById('messages-wrapper').appendChild(loadingElement);
+                
+                // Fix scrolling
+                fixScrolling();
+            }
+
+            // Function to remove loading indicator
+            function removeLoadingIndicator() {
+                const loadingElement = document.getElementById('loading-indicator');
+                if (loadingElement) {
+                    loadingElement.remove();
+                }
+            }
+
+            // Function to format message content (simple markdown-like formatting)
+            function formatMessage(content) {
+                if (!content) return '';
+                
+                // Escape HTML to prevent XSS
+                let formatted = content
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;');
+                
+                // Basic markdown-like formatting
+                
+                // Code blocks with language
+                formatted = formatted.replace(/```(\w+)?\n([\s\S]*?)\n```/g, function(match, language, code) {
+                    return `<pre><code class="language-${language || 'plaintext'}">${code}</code></pre>`;
+                });
+                
+                // Inline code
+                formatted = formatted.replace(/`([^`]+)`/g, '<code>$1</code>');
+                
+                // Bold
+                formatted = formatted.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+                
+                // Italic
+                formatted = formatted.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+                
+                // Headers (h1, h2, h3)
+                formatted = formatted.replace(/^### (.*$)/gm, '<h3>$1</h3>');
+                formatted = formatted.replace(/^## (.*$)/gm, '<h2>$1</h2>');
+                formatted = formatted.replace(/^# (.*$)/gm, '<h1>$1</h1>');
+                
+                // Convert line breaks to <br>
+                formatted = formatted.replace(/\n/g, '<br>');
+                
+                return formatted;
+            }
+        });
+    </script>
+</body>
+</html>

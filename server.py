@@ -82,7 +82,7 @@ MODEL_MAPPING = {
     "gpt-3.5-turbo-0125": "command-r7b",
     "gpt-3.5-turbo-1106": "llama3.2",
     "gpt-4o-mini": "llama3.1",
-    "gpt-4o": "qwen2.5:14b",
+    "gpt-4o": "qwen2.5:32b",
     # Add more mappings as needed
     "default": "llama3.3"
 }
@@ -104,7 +104,7 @@ MODEL_URLS = {
     "mistral-small": "http://localhost:11434/api/chat",
     "command-r7b": "http://localhost:11434/api/chat",
     "default": "http://localhost:11434/api/chat",
-    "qwen2.5:14b": "http://localhost:11434/api/chat"
+    "qwen2.5:32b": "http://localhost:11434/api/chat"
 }
 
 
