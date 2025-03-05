@@ -1,1 +1,18 @@
-{}
+{
+  "2687b8fc-7552-4545-82d3-9640e09f1267": {
+    "id": "2687b8fc-7552-4545-82d3-9640e09f1267",
+    "type": "timer",
+    "duration": 300,
+    "message": "Reminder to follow up on workout and diet plan progress.",
+    "title": "Timer Notification",
+    "priority": 3,
+    "tags": [
+      "clock",
+      "timer"
+    ],
+    "created_at": "2025-03-05T07:14:40.470155",
+    "scheduled_time": "2025-03-05T07:19:40.470147",
+    "status": "completed",
+    "completed_at": "2025-03-05T07:19:40.543154"
+  }
+}
