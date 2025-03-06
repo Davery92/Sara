@@ -9,12 +9,11 @@ import sys
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import uuid
-
+from neo4j import GraphDatabase
 
 # Import the Neo4j client
 from modules.neo4j_client import Neo4jClient
 
-# Configure logging
 # Configure logging
 logger = logging.getLogger("redis-message-store")
 
@@ -38,6 +37,38 @@ def get_neo4j_client():
             logger.error(f"Failed to initialize Neo4j client: {e}")
             raise
     return neo4j_client
+
+async def check_neo4j_connection():
+    """
+    Check the connection to the Neo4j database.
+    Returns "Connected" if successful, otherwise returns an error message.
+    """
+    try:
+        # Initialize the Neo4j driver
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+        # Test the connection by running a simple query
+        with driver.session(database=NEO4J_DB) as session:
+            result = session.run("RETURN 1 as num")
+            record = result.single()
+
+            # Check if the query returned the expected result
+            if record and record["num"] == 1:
+                logger.info("Neo4j connection successful!")
+                return "Connected"
+            else:
+                logger.warning("Neo4j connection failed: Unexpected query result")
+                return "Disconnected"
+
+    except Exception as e:
+        # Log the error and return an appropriate message
+        logger.error(f"Error checking Neo4j connection: {e}")
+        return f"Error: {str(e)}"
+
+    finally:
+        # Ensure the driver is properly closed
+        if 'driver' in locals():
+            driver.close()
 
 def integrate_neo4j_with_server(app):
     """
@@ -80,8 +111,6 @@ def integrate_neo4j_with_server(app):
     except Exception as e:
         logger.error(f"Error integrating Neo4j with server: {e}")
         raise
-
-
 
 class MessageStore:
     """
@@ -275,12 +304,10 @@ def get_message_store():
     if message_store is None:
         message_store = MessageStore()
     return message_store
-# Create a global instance for easy access
-message_store = None
 
 def test_message_store():
     """Test the message store implementation"""
-    store = get_message_store(use_neo4j=True)
+    store = get_message_store()
     
     print("Testing MessageStore...")
     if not store.ping():
