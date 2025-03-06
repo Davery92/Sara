@@ -1,3 +1,4 @@
+import subprocess
 from fastapi import FastAPI, Body, HTTPException, Request, Depends
 import numpy as np
 from pydantic import BaseModel, Field
@@ -25,7 +26,7 @@ from redis.commands.search.field import (
 )
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 import os
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, APIRouter
 from modules.neo4j_rag_integration import Neo4jRAGManager, get_neo4j_rag_manager
 from modules.rag_api import rag_router  # Import this first
 from modules.rag_web_interface import integrate_web_interface
@@ -33,12 +34,14 @@ from modules.rag_integration import integrate_rag_with_server, update_system_pro
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
+import psutil
+from modules.neo4j_connection import check_neo4j_connection
 
 
 # Initialize the message store with Neo4j backend
 message_store = get_message_store()
-
+dashboard_router = APIRouter()
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -84,7 +87,7 @@ MODEL_MAPPING = {
     "gpt-4o-mini": "llama3.1",
     "gpt-4o": "qwen2.5:32b",
     # Add more mappings as needed
-    "default": "llama3.3"
+    "default": "qwen2.5:32b"
 }
 
 # Available local models
@@ -206,7 +209,7 @@ class RedisClient:
         try:
             # Use pattern matching to find all messages for this conversation
             pattern = f"message:{conversation_id}:*"
-            message_keys = self.redis_client.keys(pattern)
+            message_keys = self.message_store.keys(pattern)
             
             # Skip embedding keys
             filtered_keys = []
@@ -334,7 +337,16 @@ class RedisClient:
         
         return similar_docs
 
-# Update the startup_event function
+def ping(self):
+    """Test the Redis connection"""
+    try:
+        return self.message_store.ping()
+    except Exception as e:
+        logger.error(f"Redis ping failed: {e}")
+        return False
+
+
+
 @app.on_event("startup")
 async def startup_event():
     """Log when the server starts up and check database connections"""
@@ -348,8 +360,15 @@ async def startup_event():
     # Load system prompts
     SYSTEM_PROMPT = load_system_prompt()
     logger.info("System prompt loaded")
+    
+    # Include the RAG router
     app.include_router(rag_router, prefix="/rag")
+    logger.info("RAG router included")
+    
+    # Integrate the web interface
     integrate_web_interface(app)
+    logger.info("Web interface integrated")
+    
     # Update the system prompt with available notes
     SYSTEM_PROMPT = update_system_prompt_with_notes(SYSTEM_PROMPT)
     logger.info("System prompt updated with available notes")
@@ -361,11 +380,13 @@ async def startup_event():
     TOOL_SYSTEM_PROMPT_TEMPLATE = load_tool_system_prompt()
     logger.info("Tool system prompt template loaded")
     
-    # Check database connection
+    
+    
+    # Check Redis connection
     if message_store.ping():
-        logger.info("Connected to database successfully")
+        logger.info("Connected to Redis database successfully")
     else:
-        logger.warning("Failed to connect to database - functionality may be limited")
+        logger.warning("Failed to connect to Redis database - functionality may be limited")
     
     # Integrate Neo4j with the server
     integrate_neo4j_with_server(app)
@@ -381,6 +402,10 @@ async def startup_event():
     
     logger.info("Server ready to accept connections")
     logger.info("=" * 50)
+
+    # Check Neo4j connection
+    neo4j_status = check_neo4j_connection()
+    logger.info(f"Neo4j connection status: {neo4j_status}")
 
 @app.get("/v1/conversations")
 async def list_conversations(limit: int = 20, offset: int = 0):
@@ -567,6 +592,7 @@ def clear_conversation_history():
     global MESSAGE_HISTORY
     MESSAGE_HISTORY = []
 
+@app.get("/")
 async def root():
     """Root endpoint to help diagnose connection issues"""
     logger.info("Root endpoint called")
@@ -581,7 +607,7 @@ async def root():
             "health": "/health"
         },
         "timestamp": datetime.now().isoformat()
-    }@app.middleware("http")
+    }
 
 def get_recent_conversations(days=7, limit=5):
     """Get summaries of recent conversations within the specified time period"""
@@ -994,6 +1020,8 @@ async def summarize_buffer_and_update_profile(conversation_id):
         conversation_buffer.clear_buffer(conversation_id)
         conversation_buffer.mark_summarization_completed(conversation_id)
 
+
+
 async def maybe_summarize_conversation(conversation_id):
     """Summarize only if the conversation is substantial"""
     messages = message_store.get_messages_by_conversation(conversation_id)
@@ -1177,10 +1205,11 @@ async def summarize_conversation(conversation_id):
         return summary
     return None
 
-def read_note(identifier: str) -> Dict[str, Any]:
+async def read_note(identifier: str) -> Dict[str, Any]:
     """Read a note by title or filename"""
     try:
-        notes = list_notes()
+        # Properly await the coroutine
+        notes = await list_notes()
         
         # Try to find the note by exact title match first
         for note in notes:
@@ -1253,10 +1282,10 @@ def delete_note(identifier: str) -> Dict[str, Any]:
         logger.error(f"Error deleting note: {e}")
         return {"error": str(e)}
 
-# Example of how to update the system prompt with note information
 def update_system_prompt_with_notes(original_prompt: str) -> str:
     """Update the system prompt to include available notes"""
-    notes_info = get_note_names_for_prompt()
+    # Use a synchronous version of get_note_names_for_prompt
+    notes_info = get_note_names_for_prompt_sync()
     
     # Check if the prompt already has notes information
     if "Available notes:" in original_prompt:
@@ -1279,6 +1308,33 @@ def update_system_prompt_with_notes(original_prompt: str) -> str:
     else:
         # Append notes information at the end
         return f"{original_prompt}\n\n{notes_info}"
+
+def get_note_names_for_prompt_sync() -> str:
+    """Get a formatted list of note names for the system prompt (synchronous version)"""
+    try:
+        # Make sure we're using the synchronous version, not the async one
+        notes = []
+        for filename in os.listdir(NOTES_DIRECTORY):
+            if filename.endswith('.json'):
+                file_path = os.path.join(NOTES_DIRECTORY, filename)
+                with open(file_path, 'r') as f:
+                    note_data = json.load(f)
+                    note_data['filename'] = filename
+                    notes.append(note_data)
+        
+        if not notes:
+            return "No notes available."
+        
+        note_list = ["Available notes:"]
+        for note in notes:
+            title = note.get('title', 'Untitled note')
+            created = note.get('created', 'Unknown date')
+            note_list.append(f"- {title} (created: {created})")
+        
+        return "\n".join(note_list)
+    except Exception as e:
+        logger.error(f"Error getting note names for prompt: {e}")
+        return "Error retrieving notes."
 
 
 def format_tool_system_prompt(template, user_query, tool_results):
@@ -1641,6 +1697,8 @@ def get_message_by_key(self, key):
     except Exception as e:
         logger.warning(f"Error retrieving message {key}: {e}")
         return None
+
+
 
 # File operations
 def write_to_file(role, content, dates):
@@ -2235,40 +2293,6 @@ async def chat_completions(request: ChatCompletionRequest):
             raise HTTPException(status_code=500, detail=f"Error in completion: {str(e)}")
 
 
-@app.get("/v1/chat/stream")
-async def stream_chat_for_interface(message: str = None):
-    """Specialized streaming endpoint for the chat interface"""
-    try:
-        # Check if message is provided
-        if not message:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Message is required"}
-            )
-            
-        # Get system prompt
-        system_message = {'role': 'system', 'content': SYSTEM_PROMPT}
-        
-        # Prepare messages for the model (just system prompt + user message)
-        model_messages = [system_message, {'role': 'user', 'content': message}]
-        
-        # Set up streaming response
-        async def stream_response():
-            async for chunk in send_to_ollama_api(model_messages, "llama3.3", TOOL_DEFINITIONS, stream=True):
-                yield chunk
-        
-        return StreamingResponse(
-            stream_response(),
-            media_type="text/event-stream"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in stream_chat_for_interface: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Error generating response: {str(e)}"}
-        )
-
 @app.post("/v1/embeddings")
 async def create_embeddings(request: EmbeddingRequest):
     try:
@@ -2437,20 +2461,521 @@ async def debug_messages(conversation_id: str):
             "message": f"Unexpected error: {str(e)}"
         }
 
+class NoteCreate(BaseModel):
+    title: str
+    content: str
+    tags: Optional[List[str]] = None
+
+class NoteUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+# Helper function to list all notes
+async def list_notes():
+    """List all notes from the notes directory."""
+    try:
+        notes = []
+        for filename in os.listdir(NOTES_DIRECTORY):
+            if filename.endswith(".json"):
+                file_path = os.path.join(NOTES_DIRECTORY, filename)
+                with open(file_path, "r") as f:
+                    note_data = json.load(f)
+                    notes.append({
+                        "filename": filename,
+                        **note_data
+                    })
+        return notes
+    except Exception as e:
+        logger.error(f"Error listing notes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Helper function to get note names for the prompt
+async def get_note_names_for_prompt():
+    """Get note names for the prompt."""
+    try:
+        notes = await list_notes()  # Await the coroutine
+        note_names = [note["title"] for note in notes]  # Extract note titles
+        return note_names
+    except Exception as e:
+        logger.error(f"Error getting note names for prompt: {e}")
+        raise
+
+# Example usage of get_note_names_for_prompt
+async def some_other_function():
+    try:
+        note_names = await get_note_names_for_prompt()  # Await the coroutine
+        logger.info(f"Note names: {note_names}")
+    except Exception as e:
+        logger.error(f"Error in some_other_function: {e}")
+        raise
+
+# API Endpoints
+@dashboard_router.get("/v1/notes")
+async def list_notes_endpoint(limit: int = 100, offset: int = 0):
+    """List all notes with pagination"""
+    try:
+        notes = await list_notes()  # Await the coroutine
+        
+        # Apply pagination
+        paginated_notes = notes[offset:offset + limit]
+        
+        return {"notes": paginated_notes, "total": len(notes)}
+    except Exception as e:
+        logger.error(f"Error listing notes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.get("/v1/notes/count")
+async def get_notes_count():
+    """Get the total count of notes"""
+    try:
+        notes = await list_notes()  # Await the coroutine
+        return {"count": len(notes)}
+    except Exception as e:
+        logger.error(f"Error counting notes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.post("/v1/notes")
+async def create_note_endpoint(note: NoteCreate):
+    """Create a new note"""
+    try:
+        result = create_note(
+            title=note.title,
+            content=note.content,
+            tags=note.tags or []
+        )
+        
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+            
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating note: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.get("/v1/notes/{note_id}")
+async def get_note_endpoint(note_id: str):
+    """Get a note by its identifier"""
+    try:
+        # Await the async function
+        note = await read_note(note_id)
+        
+        if "error" in note:
+            raise HTTPException(status_code=404, detail=note["error"])
+            
+        return note
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reading note: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.put("/v1/notes/{note_id}")
+async def update_note_endpoint(note_id: str, note: NoteUpdate):
+    """Update a note"""
+    try:
+        # First get the existing note
+        existing = read_note(note_id)
+        
+        if "error" in existing:
+            raise HTTPException(status_code=404, detail=existing["error"])
+        
+        # Update the fields that are provided
+        updated_content = existing.get('content', '')
+        
+        if note.content is not None:
+            updated_content = note.content
+        
+        # For a complete update, use append_note with a complete replacement
+        result = append_note(note_id, updated_content, replace=True)
+        
+        # Update title and tags if needed
+        if note.title is not None or note.tags is not None:
+            # Get the file path
+            filename = existing.get('filename')
+            file_path = os.path.join(NOTES_DIRECTORY, filename)
+            
+            with open(file_path, 'r') as f:
+                note_data = json.load(f)
+            
+            if note.title is not None:
+                note_data['title'] = note.title
+                
+            if note.tags is not None:
+                note_data['tags'] = note.tags
+                
+            note_data['last_modified'] = datetime.now().isoformat()
+            
+            with open(file_path, 'w') as f:
+                json.dump(note_data, f, indent=2)
+        
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+            
+        return {"status": "success", "message": "Note updated successfully", "note_id": note_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating note: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.delete("/v1/notes/{note_id}")
+async def delete_note_endpoint(note_id: str):
+    """Delete a note"""
+    try:
+        result = delete_note(note_id)
+        
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+            
+        return {"status": "success", "message": "Note deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting note: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Memory Endpoints ---
+
+class MemoryCreate(BaseModel):
+    memory: str
+
+class MemoriesRewrite(BaseModel):
+    memories: List[str]
+
+@dashboard_router.get("/v1/memory/core")
+async def get_core_memories():
+    """Get all core memories"""
+    try:
+        content = load_core_memories()
+        
+        # Parse the content into a list of memories
+        memories = []
+        if content:
+            # Split by lines and remove any empty lines
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line:
+                    # Remove leading dash if present
+                    if line.startswith('- '):
+                        line = line[2:]
+                    memories.append(line)
+        
+        return {"memories": memories}
+    except Exception as e:
+        logger.error(f"Error loading core memories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.post("/v1/memory/core")
+async def add_core_memory(memory: MemoryCreate):
+    """Add a new core memory"""
+    try:
+        result = append_core_memory(memory.memory)
+        
+        if not result.get("success", False):
+            raise HTTPException(status_code=400, detail=result.get("message", "Failed to add memory"))
+            
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding core memory: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.post("/v1/memory/core/rewrite")
+async def rewrite_core_memories_endpoint(memories: MemoriesRewrite):
+    """Rewrite all core memories"""
+    try:
+        result = rewrite_core_memories(memories.memories)
+        
+        if not result.get("success", False):
+            raise HTTPException(status_code=400, detail=result.get("message", "Failed to rewrite memories"))
+            
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rewriting core memories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@dashboard_router.get("/v1/memory/core/stats")
+async def get_core_memory_stats_endpoint():
+    """Get statistics about core memories"""
+    try:
+        result = get_core_memory_stats()
+        return result
+    except Exception as e:
+        logger.error(f"Error getting core memory stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- System Endpoints ---
+
+@dashboard_router.get("/v1/models/mapping")
+async def get_model_mapping():
+    """Get the mapping between OpenAI models and local models"""
+    return MODEL_MAPPING
+
+@app.get("/v1/system/gpu")
+async def get_gpu_usage():
+    """Get GPU usage information (supports multiple GPUs)"""
+    try:
+        # Use nvidia-smi command to get GPU info
+        try:
+            # Command to get all GPUs' data
+            output = subprocess.check_output(['nvidia-smi', '--query-gpu=index,memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits']).decode('utf-8').strip()
+            
+            # Split by newlines to get each GPU's data
+            gpu_lines = output.strip().split('\n')
+            
+            # Process all GPUs
+            gpus = []
+            for line in gpu_lines:
+                values = [val.strip() for val in line.split(',')]
+                
+                if len(values) >= 4:
+                    try:
+                        gpu_index = int(values[0])
+                        memory_used = float(values[1])
+                        memory_total = float(values[2])
+                        utilization = float(values[3])
+                        
+                        gpus.append({
+                            "index": gpu_index,
+                            "memory_used": memory_used / 1024,  # Convert to GB
+                            "memory_total": memory_total / 1024,  # Convert to GB
+                            "utilization": utilization
+                        })
+                    except ValueError:
+                        logger.warning(f"Could not convert GPU values to float: {values}")
+                        continue
+            
+            # Return information about all GPUs
+            return {
+                "gpus": gpus,
+                "total_gpus": len(gpus),
+                "primary_gpu": gpus[0] if gpus else {
+                    "memory_used": 0,
+                    "memory_total": 0,
+                    "utilization": 0
+                }
+            }
+                
+        except (subprocess.SubprocessError, ValueError, IndexError) as e:
+            logger.warning(f"Failed to get GPU info from nvidia-smi: {e}")
+            return {
+                "gpus": [],
+                "total_gpus": 0,
+                "primary_gpu": {
+                    "memory_used": 0,
+                    "memory_total": 0,
+                    "utilization": 0
+                },
+                "error": str(e)
+            }
+    except Exception as e:
+        logger.error(f"Error getting GPU usage: {e}")
+        return {
+            "gpus": [],
+            "total_gpus": 0,
+            "primary_gpu": {
+                "memory_used": 0,
+                "memory_total": 0,
+                "utilization": 0
+            },
+            "error": str(e)
+        }
+
+def use_default_values(error_message, gpu_count=1):
+    """Helper function to return default GPU values"""
+    return {
+        "memory_used": 4,  # Default value
+        "memory_total": 16,  # Default value
+        "utilization": 30,  # Default value
+        "total_gpus": gpu_count,
+        "error": error_message
+    }
+@dashboard_router.get("/v1/system/log", response_class=PlainTextResponse)
+async def get_system_log():
+    """Get the last 100 lines of the system log"""
+    try:
+        log_file = "/home/david/sara-jarvis/Test/openai_server.log"
+        
+        if not os.path.exists(log_file):
+            return "Log file not found"
+            
+        # Get last 100 lines
+        with open(log_file, 'r') as f:
+            lines = f.readlines()
+            return ''.join(lines[-100:])
+    except Exception as e:
+        logger.error(f"Error reading system log: {e}")
+        return f"Error reading system log: {str(e)}"
+
+# --- Dashboard API ---
+
+@app.get("/dashboard")
+async def serve_dashboard():
+    """Serve the dashboard page"""
+    dashboard_html_path = "/home/david/Sara/static/dashboard.html"
+    return FileResponse(dashboard_html_path)
+
+# Add the dashboard router to the main app
+app.include_router(dashboard_router)
+
+# Helper function to append note with replace option
+def append_note(identifier: str, content: str, replace: bool = False) -> Dict[str, Any]:
+    """Append content to an existing note or replace its content"""
+    try:
+        # First, find the note
+        note = read_note(identifier)
+        if "error" in note:
+            return note
+        
+        # Get the file path
+        filename = note.get('filename')
+        file_path = os.path.join(NOTES_DIRECTORY, filename)
+        
+        # Update content and timestamp
+        if replace:
+            note['content'] = content
+        else:
+            note['content'] = note.get('content', '') + '\n\n' + content
+            
+        note['last_modified'] = datetime.now().isoformat()
+        
+        # Write the updated note
+        with open(file_path, 'w') as f:
+            json.dump(note, f, indent=2)
+        
+        logger.info(f"{'Updated' if replace else 'Appended to'} note: {note.get('title')} ({filename})")
+        return note
+    except Exception as e:
+        logger.error(f"Error {'updating' if replace else 'appending to'} note: {e}")
+        return {"error": str(e)}
+
+@app.get("/v1/system/resources")
+async def get_system_resources():
+    """Get system CPU and RAM usage information"""
+    try:
+        # Get CPU usage percentage
+        cpu_usage = psutil.cpu_percent(interval=0.5)
+        
+        # Get memory information
+        memory = psutil.virtual_memory()
+        ram_used = memory.used / (1024 ** 3)  # Convert to GB
+        ram_total = memory.total / (1024 ** 3)  # Convert to GB
+        
+        return {
+            "cpu_usage": cpu_usage,
+            "ram_used": round(ram_used, 2),
+            "ram_total": round(ram_total, 2)
+        }
+    except Exception as e:
+        logger.error(f"Error getting system resources: {e}")
+        return {
+            "cpu_usage": 0,
+            "ram_used": 0,
+            "ram_total": 0,
+            "error": str(e)
+        }
+
+
+@app.get("/v1/system/gpu")
+async def get_gpu_usage():
+    """Get GPU usage information"""
+    try:
+        # Use nvidia-smi command to get GPU info
+        try:
+            output = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits']).decode('utf-8').strip()
+            
+            # Clean the output - handle potential newlines or extra whitespace
+            cleaned_output = output.replace('\n', ',').replace('\r', '')
+            values = [val.strip() for val in cleaned_output.split(',') if val.strip()]
+            
+            if len(values) >= 3:
+                try:
+                    memory_used = float(values[0])
+                    memory_total = float(values[1])
+                    utilization = float(values[2])
+                    
+                    return {
+                        "memory_used": memory_used / 1024,  # Convert to GB
+                        "memory_total": memory_total / 1024,  # Convert to GB
+                        "utilization": utilization
+                    }
+                except ValueError as ve:
+                    logger.warning(f"Could not convert GPU values to float: {values}, error: {ve}")
+                    # Fall back to default values
+                    return {
+                        "memory_used": 4,  # Default value
+                        "memory_total": 16,  # Default value
+                        "utilization": 30,  # Default value
+                        "error": f"Value conversion error: {ve}"
+                    }
+            else:
+                raise ValueError(f"Not enough values returned from nvidia-smi: {values}")
+        except (subprocess.SubprocessError, ValueError, IndexError) as e:
+            logger.warning(f"Failed to get GPU info from nvidia-smi: {e}")
+            # Return default values
+            return {
+                "memory_used": 4,  # Default value
+                "memory_total": 16,  # Default value
+                "utilization": 30,  # Default value
+                "error": str(e)
+            }
+    except Exception as e:
+        logger.error(f"Error getting GPU usage: {e}")
+        return {
+            "memory_used": 4,  # Default value
+            "memory_total": 16,  # Default value
+            "utilization": 30,  # Default value
+            "error": str(e)
+        }
+    
+@app.get("/v1/neo4j/check-direct")
+async def check_neo4j_direct():
+    """Direct endpoint to check Neo4j connection"""
+    try:
+        # Get the Neo4j RAG manager
+        neo4j_manager = get_neo4j_rag_manager()
+        
+        if not neo4j_manager or not hasattr(neo4j_manager, 'driver'):
+            return {"status": "Not Configured"}
+        
+        # Try a direct query
+        try:
+            with neo4j_manager.driver.session(database=neo4j_manager.neo4j_db) as session:
+                result = session.run("RETURN 1 as num")
+                record = result.single()
+                status = "Connected" if record and record["num"] == 1 else "Disconnected"
+                return {"status": status}
+        except Exception as e:
+            logger.error(f"Direct Neo4j check failed: {e}")
+            return {"status": "Error"}
+    except Exception as e:
+        logger.error(f"Error in direct Neo4j check: {e}")
+        return {"status": "Error"}
 
 @app.get("/health", status_code=200)
 async def health_check():
-    """Health check endpoint that also checks Redis connection"""
+    """Health check endpoint that also checks Redis and Neo4j connections"""
     logger.info("Health check endpoint called")
     
     # Check Redis connection
     redis_status = "connected" if message_store.ping() else "disconnected"
+    
+    # Check Neo4j connection
+    neo4j_status = check_neo4j_connection()
     
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "services": {
             "redis": redis_status,
+            "neo4j": neo4j_status.lower(),
             "server": "online"
         }
     }

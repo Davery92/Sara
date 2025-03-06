@@ -85,6 +85,7 @@ class Neo4jRAGManager:
             logger.error(f"Failed to connect to Neo4j even without constraints: {e}")
             return False
 
+    
 
     def _ensure_constraints(self):
         """Create necessary constraints and indices in Neo4j"""
