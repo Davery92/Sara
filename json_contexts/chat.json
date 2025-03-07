@@ -1,0 +1,14 @@
+{
+  "context_type": "chat",
+  "data": {
+    "content": "Multiple chat topics: The user initiated a casual conversation and is open to discussing any topic. (+ 3 more)",
+    "confidence_score": 0.95,
+    "last_updated": "2025-03-06",
+    "entries": [
+      "The user initiated a casual conversation and is open to discussing any topic.",
+      "The user initiates a casual conversation without specific topics, leading the assistant to suggest various subjects like world building and previous notes.",
+      "The user initiates a casual conversation.",
+      "The user expresses a desire to have an informal conversation and the assistant suggests various topics such as books or TV shows, also referencing previous conversations."
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "context_type": "greeting",
+  "data": {
+    "content": "The user initiates a conversation with a simple greeting.",
+    "confidence_score": 0.92,
+    "last_updated": "2025-03-06"
+  }
+}

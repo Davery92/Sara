@@ -1,0 +1,8 @@
+{
+  "context_type": "appointment",
+  "data": {
+    "content": "The user is discussing an upcoming appointment at 5 PM and the assistant offers to set a reminder for them.",
+    "confidence_score": 0.93,
+    "last_updated": "2025-03-06"
+  }
+}

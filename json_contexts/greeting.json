@@ -1,0 +1,27 @@
+{
+  "context_type": "greeting",
+  "data": {
+    "content": "Multiple greeting topics: The user is greeting. (+ 16 more)",
+    "confidence_score": 0.95,
+    "last_updated": "2025-03-06",
+    "entries": [
+      "The user is greeting.",
+      "The user greeted the assistant.",
+      "The user is ambiguously indicating their presence for conversation without a specific topic.",
+      "The user is greeting Sara.",
+      "The user is greeting Sara and the assistant responds enthusiastically, asking if the user needs help or just wants to chat.",
+      "The user initiates a greeting.",
+      "The user expresses a desire to engage in casual conversation.",
+      "The user initiates a greeting, and the assistant responds warmly and asks how they can be of assistance.",
+      "The user initiates a casual conversation without specific topics.",
+      "The user initiates a conversation with a simple greeting.",
+      "The user initiates a conversation with a simple greeting, and the assistant responds warmly, offering assistance in various forms.",
+      "The user initiated a conversation with a greeting, and the assistant responded by offering help on an unspecified issue or topic.",
+      "The user initiates a conversation with a greeting, and the assistant responds by checking in on how the user's day is going and offering help with various topics.",
+      "The user initiates a conversation with a casual greeting.",
+      "The user seems to have made a typo in their greeting, and there is no specific discussion or question beyond the initial message.",
+      "The user initiated a conversation with a greeting.",
+      "The user sends a casual greeting, and the assistant responds in a flirtatious manner."
+    ]
+  }
+}

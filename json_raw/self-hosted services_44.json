@@ -1,0 +1,8 @@
+{
+  "context_type": "self-hosted services",
+  "data": {
+    "content": "The user discusses setting up a self-hosted ntfy server for push notifications and integrating it with a neo4j database to send timer and reminders to their iPhone.",
+    "confidence_score": 0.95,
+    "last_updated": "2025-03-06"
+  }
+}

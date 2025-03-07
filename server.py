@@ -37,6 +37,7 @@ from modules.neo4j_integration import get_message_store, integrate_neo4j_with_se
 from fastapi.responses import FileResponse, PlainTextResponse
 import psutil
 from modules.neo4j_connection import check_neo4j_connection
+import tiktoken
 
 
 # Initialize the message store with Neo4j backend
@@ -67,7 +68,7 @@ app.add_middleware(
 NOTES_DIRECTORY = "/home/david/Sara/notes"
 
 MESSAGE_HISTORY = []
-MAX_HISTORY = 15  # Maximum number of messages (excluding system prompt)
+MAX_HISTORY = 30  # Maximum number of messages (excluding system prompt)
 
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
@@ -345,7 +346,66 @@ def ping(self):
         logger.error(f"Redis ping failed: {e}")
         return False
 
+def count_tokens(text, model="cl100k_base"):
+    """Count the number of tokens in a text string."""
+    try:
+        encoder = tiktoken.get_encoding(model)
+        return len(encoder.encode(text))
+    except Exception as e:
+        logger.error(f"Error counting tokens: {str(e)}")
+        # Fallback simple estimate: ~4 chars per token on average
+        return len(text) // 4
 
+def save_conversation_history():
+    """Save the current conversation history to Redis for persistence"""
+    try:
+        # Convert the conversation history to JSON
+        history_json = json.dumps(MESSAGE_HISTORY)
+        
+        # Store in Redis - Fix: use client.redis_client
+        message_store.client.redis_client.set("conversation_history", history_json)
+        
+        logger.info(f"Saved conversation history ({len(MESSAGE_HISTORY)} messages) to Redis")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving conversation history: {str(e)}")
+        return False
+    
+def load_conversation_history():
+    """Load the conversation history from Redis"""
+    global MESSAGE_HISTORY
+    
+    try:
+        # Get the saved history from Redis
+        history_json = message_store.client.redis_client.get("conversation_history")
+        
+        if history_json:
+            if isinstance(history_json, bytes):
+                history_json = history_json.decode('utf-8')
+                
+            # Parse the JSON
+            loaded_history = json.loads(history_json)
+            
+            # Validate each message has required fields
+            valid_history = []
+            for msg in loaded_history:
+                if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                    # Add token count if missing
+                    if 'tokens' not in msg:
+                        msg['tokens'] = count_tokens(msg['content'])
+                    valid_history.append(msg)
+            
+            # Update the MESSAGE_HISTORY
+            MESSAGE_HISTORY = valid_history
+            
+            logger.info(f"Loaded conversation history from Redis ({len(MESSAGE_HISTORY)} messages)")
+            return True
+    except Exception as e:
+        logger.error(f"Error loading conversation history: {str(e)}")
+    
+    # If we reach here, we either had an error or no history was found
+    MESSAGE_HISTORY = []
+    return False
 
 @app.on_event("startup")
 async def startup_event():
@@ -380,7 +440,11 @@ async def startup_event():
     TOOL_SYSTEM_PROMPT_TEMPLATE = load_tool_system_prompt()
     logger.info("Tool system prompt template loaded")
     
+    load_conversation_history()
+    logger.info("Conversation history loaded")
     
+    asyncio.create_task(periodic_save_history())
+    logger.info("Started periodic conversation history saving")
     
     # Check Redis connection
     if message_store.ping():
@@ -406,6 +470,14 @@ async def startup_event():
     # Check Neo4j connection
     neo4j_status = check_neo4j_connection()
     logger.info(f"Neo4j connection status: {neo4j_status}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Save conversation history when shutting down"""
+    logger.info("Server shutting down, saving conversation history...")
+    save_conversation_history()
+    logger.info("Shutdown complete")
+
 
 @app.get("/v1/conversations")
 async def list_conversations(limit: int = 20, offset: int = 0):
@@ -569,10 +641,11 @@ def add_message_to_history(role, content):
 
 def get_messages_with_system_prompt():
     """
-    Get the full message list with system prompt for the model
+    Get the full message list with system prompt for the model, with token counts
     
     Returns:
         list: Complete message list for sending to model
+        dict: Token statistics
     """
     global MESSAGE_HISTORY
     
@@ -580,12 +653,61 @@ def get_messages_with_system_prompt():
     current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # Create system message with current date
-    system_message = {'role': 'system', 'content': f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}"}
+    system_prompt = f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}"
+    system_tokens = count_tokens(system_prompt)
+    
+    # Create system message
+    system_message = {
+        'role': 'system', 
+        'content': system_prompt,
+        'tokens': system_tokens
+    }
     
     # Combine system message with conversation history
     messages = [system_message] + MESSAGE_HISTORY
     
-    return messages
+    # Calculate token statistics
+    history_tokens = sum(msg.get('tokens', 0) for msg in MESSAGE_HISTORY)
+    total_tokens = system_tokens + history_tokens
+    
+    token_stats = {
+        'system_tokens': system_tokens,
+        'history_tokens': history_tokens,
+        'total_tokens': total_tokens
+    }
+    
+    # Log token usage
+    logger.info(f"Token usage - System: {system_tokens}, History: {history_tokens}, Total: {total_tokens}")
+    
+    # Store token stats in Redis for dashboard
+    try:
+        token_stats_json = json.dumps(token_stats)
+        
+        # Use a more careful approach to avoid attribute errors
+        try:
+            # Try different possible Redis client locations
+            if hasattr(message_store, 'client') and hasattr(message_store.client, 'redis_client'):
+                message_store.client.redis_client.set("token_stats", token_stats_json)
+            elif hasattr(message_store, 'message_store'):
+                message_store.message_store.set("token_stats", token_stats_json)
+            elif hasattr(message_store, 'redis_client'):
+                message_store.redis_client.set("token_stats", token_stats_json)
+            else:
+                # Skip Redis storage with a warning
+                logger.warning("Couldn't find appropriate Redis client attribute in message_store")
+        except Exception as e:
+            logger.warning(f"Failed to store token stats in Redis: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error preparing token stats for Redis: {str(e)}")
+    
+    # Return the messages without token counts for the model
+    clean_messages = []
+    for msg in messages:
+        clean_msg = {'role': msg['role'], 'content': msg['content']}
+        clean_messages.append(clean_msg)
+    
+    return clean_messages, token_stats
+
 
 def clear_conversation_history():
     """Reset the conversation history"""
@@ -631,6 +753,18 @@ def get_recent_conversations(days=7, limit=5):
         })
     
     return summaries
+
+async def periodic_save_history():
+    """Periodically save conversation history to ensure it's not lost"""
+    while True:
+        try:
+            # Wait for 5 minutes
+            await asyncio.sleep(300)
+            
+            # Save the conversation history
+            save_conversation_history()
+        except Exception as e:
+            logger.error(f"Error in periodic history save: {str(e)}")
 
 def update_user_profile(user_id, conversation_id):
     """Update user profile based on conversation"""
@@ -1696,8 +1830,7 @@ def get_message_by_key(self, key):
             return None
     except Exception as e:
         logger.warning(f"Error retrieving message {key}: {e}")
-        return None
-
+        return 
 
 
 # File operations
@@ -2029,7 +2162,7 @@ async def fetch_ollama_response(messages, model, tools=None):
             raise HTTPException(status_code=500, detail=error_msg)
 
 # Define a new function to manage the conversation window
-def manage_conversation_window(conversation_id, max_history=15):
+def manage_conversation_window(conversation_id, max_history=30):
     """
     Retrieve the last N messages from a conversation to use as context.
     If there are more than max_history messages, oldest messages will be excluded.
@@ -2056,64 +2189,31 @@ def manage_conversation_window(conversation_id, max_history=15):
         logger.error(f"Error retrieving conversation window: {str(e)}")
         return []
 
-# Format chunk as SSE message (Server-Sent Events)
 def format_sse_message(data):
-    # Convert Ollama format to OpenAI format for streaming
+    """Format a response as a Server-Sent Event message"""
     try:
-        ollama_data = json.loads(data)
+        # If it's already a string, try to parse it as JSON
+        if isinstance(data, str):
+            try:
+                data_obj = json.loads(data)
+            except json.JSONDecodeError:
+                # If it's not valid JSON, just wrap it in an SSE format
+                return f"data: {data}\n\n"
+        else:
+            data_obj = data
         
-        # Extract the content from Ollama response
-        if 'message' in ollama_data and 'content' in ollama_data['message']:
-            content = ollama_data['message']['content']
-            
-            # Create OpenAI-compatible delta structure
-            openai_chunk = {
-                "id": f"chatcmpl-{uuid4()}",
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": ollama_data.get('model', 'unknown'),
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "content": content
-                        },
-                        "finish_reason": None
-                    }
-                ]
-            }
-            
-            return f"data: {json.dumps(openai_chunk)}\n\n"
+        # Generate a unique ID for each message
+        message_id = f"chatcmpl-{uuid4()}"
+        current_time = int(datetime.now().timestamp())
         
-        # Handle tool calls if present
-        elif 'message' in ollama_data and 'tool_calls' in ollama_data['message']:
-            tool_calls = ollama_data['message']['tool_calls']
-            
-            openai_chunk = {
-                "id": f"chatcmpl-{uuid4()}",
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": ollama_data.get('model', 'unknown'),
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": tool_calls
-                        },
-                        "finish_reason": None
-                    }
-                ]
-            }
-            
-            return f"data: {json.dumps(openai_chunk)}\n\n"
-            
-        # For the final chunk
-        elif ollama_data.get('done', False):
+        # Special handling for "done" messages
+        if isinstance(data_obj, dict) and data_obj.get('done', False):
+            # First send the final chunk
             done_chunk = {
-                "id": f"chatcmpl-{uuid4()}",
+                "id": message_id,
                 "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": ollama_data.get('model', 'unknown'),
+                "created": current_time,
+                "model": data_obj.get('model', 'unknown'),
                 "choices": [
                     {
                         "index": 0,
@@ -2124,13 +2224,112 @@ def format_sse_message(data):
             }
             return f"data: {json.dumps(done_chunk)}\n\ndata: [DONE]\n\n"
         
-        # For other cases, pass through as is
-        return f"data: {data}\n\n"
+        # Handle error messages
+        if isinstance(data_obj, dict) and 'error' in data_obj:
+            error_chunk = {
+                "id": message_id,
+                "object": "chat.completion.chunk",
+                "created": current_time,
+                "model": data_obj.get('model', 'unknown'),
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": data_obj['error']
+                        },
+                        "finish_reason": "error"
+                    }
+                ]
+            }
+            return f"data: {json.dumps(error_chunk)}\n\n"
         
-    except json.JSONDecodeError:
-        # If it's not valid JSON, just wrap it in an SSE format
-        return f"data: {data}\n\n"
-
+        # Handle message content
+        if isinstance(data_obj, dict) and 'message' in data_obj:
+            message = data_obj['message']
+            
+            # Handle content
+            if 'content' in message:
+                # Make sure content is a string
+                content = str(message['content'])
+                
+                openai_chunk = {
+                    "id": message_id,
+                    "object": "chat.completion.chunk",
+                    "created": current_time,
+                    "model": data_obj.get('model', 'unknown'),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": content
+                            },
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                return f"data: {json.dumps(openai_chunk)}\n\n"
+                
+            # Handle tool calls
+            elif 'tool_calls' in message:
+                openai_chunk = {
+                    "id": message_id,
+                    "object": "chat.completion.chunk",
+                    "created": current_time,
+                    "model": data_obj.get('model', 'unknown'),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": message['tool_calls']
+                            },
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                return f"data: {json.dumps(openai_chunk)}\n\n"
+        
+        # Handle cases where we have a complete OpenAI-style chunk already
+        if (isinstance(data_obj, dict) and 
+            data_obj.get('object') == 'chat.completion.chunk' and
+            'choices' in data_obj):
+            # It's already formatted correctly, just wrap in SSE
+            return f"data: {json.dumps(data_obj)}\n\n"
+        
+        # Default case - just wrap in SSE format with basic structure
+        default_chunk = {
+            "id": message_id,
+            "object": "chat.completion.chunk",
+            "created": current_time,
+            "model": data_obj.get('model', 'unknown') if isinstance(data_obj, dict) else 'unknown',
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": str(data_obj) if not isinstance(data_obj, dict) else json.dumps(data_obj)
+                    },
+                    "finish_reason": None
+                }
+            ]
+        }
+        return f"data: {json.dumps(default_chunk)}\n\n"
+    except Exception as e:
+        # If any error occurs, format a basic error message
+        error_chunk = {
+            "id": f"chatcmpl-{uuid4()}",
+            "object": "chat.completion.chunk",
+            "created": int(datetime.now().timestamp()),
+            "model": "unknown",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": f"Error formatting message: {str(e)}"
+                    },
+                    "finish_reason": "error"
+                }
+            ]
+        }
+        return f"data: {json.dumps(error_chunk)}\n\n"
 # Pydantic models for OpenAI API
 class Message(BaseModel):
     role: str
@@ -2204,13 +2403,12 @@ async def chat_completions(request: ChatCompletionRequest):
     # Add user message to history
     add_message_to_history('user', latest_user_message['content'])
     
-    # Get messages for model
-    messages = get_messages_with_system_prompt()
+    # Get messages for model - using the fixed version that properly handles token stats
+    messages, token_stats = get_messages_with_system_prompt()
     
     logger.info(f"Sending {len(messages)} messages to model")
     
-    # Still store in Redis for vector search functionality
-    # This doesn't affect the conversation history logic
+    # Store in Redis for vector search functionality
     if message_store:
         try:
             embed_and_save(latest_user_message['content'], "primary_conversation", "user")
@@ -2221,6 +2419,7 @@ async def chat_completions(request: ChatCompletionRequest):
     if stream:
         async def stream_response():
             full_response = ""
+            # Use the existing send_to_ollama_api function which was working correctly
             async for chunk in send_to_ollama_api(messages, model, tools, stream=True):
                 yield chunk
                 
@@ -2232,13 +2431,15 @@ async def chat_completions(request: ChatCompletionRequest):
                         if 'content' in delta and delta['content']:
                             full_response += delta['content']
                 except Exception as e:
+                    # Just log the error and continue
+                    logger.debug(f"Error extracting content from chunk: {str(e)}")
                     pass
             
             # Add assistant response to history
             if full_response:
                 add_message_to_history('assistant', full_response)
                 
-                # Optionally also store in Redis for vector search
+                # Also store in Redis for vector search
                 if message_store:
                     try:
                         embed_and_save(full_response, "primary_conversation", "assistant")
@@ -2259,7 +2460,7 @@ async def chat_completions(request: ChatCompletionRequest):
                 assistant_content = response['message']['content']
                 add_message_to_history('assistant', assistant_content)
                 
-                # Optionally store in Redis for vector search
+                # Store in Redis for vector search
                 if message_store:
                     embed_and_save(assistant_content, "primary_conversation", "assistant")
             
@@ -2280,9 +2481,9 @@ async def chat_completions(request: ChatCompletionRequest):
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": len(str(messages)),
-                    "completion_tokens": len(assistant_content),
-                    "total_tokens": len(str(messages)) + len(assistant_content)
+                    "prompt_tokens": token_stats.get('total_tokens', 0),
+                    "completion_tokens": len(assistant_content) // 4,  # Rough estimate
+                    "total_tokens": token_stats.get('total_tokens', 0) + len(assistant_content) // 4
                 }
             }
             
@@ -2291,7 +2492,6 @@ async def chat_completions(request: ChatCompletionRequest):
         except Exception as e:
             logger.error(f"Error in completion: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error in completion: {str(e)}")
-
 
 @app.post("/v1/embeddings")
 async def create_embeddings(request: EmbeddingRequest):
@@ -2958,6 +3158,36 @@ async def check_neo4j_direct():
     except Exception as e:
         logger.error(f"Error in direct Neo4j check: {e}")
         return {"status": "Error"}
+
+@app.get("/v1/stats/tokens")
+async def get_token_stats():
+    """Get current token statistics for the dashboard"""
+    try:
+        # Get the stats from Redis
+        # Fix: message_store directly has the client attribute
+        token_stats_json = message_store.client.redis_client.get("token_stats")
+        
+        if token_stats_json:
+            if isinstance(token_stats_json, bytes):
+                token_stats_json = token_stats_json.decode('utf-8')
+                
+            # Parse the JSON
+            token_stats = json.loads(token_stats_json)
+        else:
+            # Calculate current stats if not in Redis
+            _, token_stats = get_messages_with_system_prompt()
+        
+        return token_stats
+    except Exception as e:
+        logger.error(f"Error retrieving token stats: {str(e)}")
+        # Return default stats - fixing the 'a' variable typo
+        return {
+            'system_tokens': 0,
+            'history_tokens': 0,
+            'total_tokens': 0  # Fixed: replaced 'a' with 0
+        }
+
+
 
 @app.get("/health", status_code=200)
 async def health_check():

@@ -822,7 +822,13 @@
                         <span class="stat-value" id="gpu-memory-usage">--</span>
                         <span class="stat-detail">VRAM Utilization</span>
                     </div>
+                    <div class="stat-card">
+                        <span class="stat-title">Token Usage</span>
+                        <span class="stat-value" id="total-tokens-count">--</span>
+                        <span class="stat-detail">System: <span id="system-tokens">--</span> | History: <span id="history-tokens">--</span></span>
+                    </div>
                 </div>
+                
 
                 <div class="card">
                     <div class="card-title">
@@ -1128,8 +1134,15 @@
             <!-- Dashboard Integration JavaScript -->
             <script>
             // Dashboard API endpoints
+            // Dashboard API endpoints
+            // Continued from previous part
             const API_BASE_URL = '/v1';
-            
+
+            // Auto-refresh configuration
+            let autoRefreshEnabled = true;
+            let autoRefreshInterval = 30000; // 30 seconds by default
+            let autoRefreshTimerId = null;
+
             // Cache for dashboard data
             let dashboardCache = {
                 notes: [],
@@ -1140,147 +1153,116 @@
                     neo4j: 'unknown'
                 },
                 gpuStats: {
-                    memoryUsed: 0,
-                    memoryTotal: 0,
-                    utilization: 0
+                    gpus: [],
+                    totalGpus: 0,
+                    primaryGpu: {
+                        memory_used: 0,
+                        memory_total: 1,
+                        utilization: 0
+                    }
                 },
                 systemResources: {
                     cpuUsage: 0,
                     ramUsed: 0,
                     ramTotal: 0
                 },
-                models: []
+                models: [],
+                tokenStats: {
+                    systemTokens: 0,
+                    historyTokens: 0,
+                    totalTokens: 0
+                }
             };
-            
-            // Initialize dashboard on load
-            document.addEventListener('DOMContentLoaded', () => {
-                initializeDashboard();
-                setupEventListeners();
-            });
-            
-            async function initializeDashboard() {
-                showLoadingState();
+
+            // Utility Functions
+            function formatDate(dateString) {
+                if (!dateString) return 'Unknown';
                 
-                try {
-                    // Load data concurrently
-                    await Promise.all([
-                        loadSystemStatus(),
-                        loadGpuStats(),
-                        loadSystemResources(),
-                        loadNotes(),
-                        loadCoreMemories(),
-                        loadModels(),
-                        loadSystemLog()
-                    ]);
-                    
-                    // Update UI
-                    updateDashboardStats();
-                    updateSystemStatusUI();
-                    updateRecentNotesTable();
-                    updateGpuMeters();
-                    updateSystemResources();
-                    updateMemoriesTable();
-                    updateModelsTable();
-                    
-                    // Show success toast
-                    showToast('Dashboard loaded successfully', 'success');
-                } catch (error) {
-                    console.error('Error initializing dashboard:', error);
-                    showToast('Failed to load dashboard data', 'danger');
+                const date = new Date(dateString);
+                if (isNaN(date.getTime())) return dateString;
+                
+                return date.toLocaleString();
+            }
+
+            function formatTags(tags) {
+                if (!tags || tags.length === 0) return '';
+                
+                return tags.map(tag => `<span class="tag">${tag}</span>`).join('');
+            }
+
+            function showToast(message, type = 'success') {
+                const toastContainer = document.querySelector('.toast-container');
+                
+                // Create container if it doesn't exist
+                if (!toastContainer) {
+                    const container = document.createElement('div');
+                    container.className = 'toast-container';
+                    document.body.appendChild(container);
                 }
                 
-                hideLoadingState();
+                const toast = document.createElement('div');
+                toast.className = `toast toast-${type}`;
+                toast.innerHTML = message;
+                
+                document.querySelector('.toast-container').appendChild(toast);
+                
+                // Remove toast after 3 seconds
+                setTimeout(() => {
+                    toast.remove();
+                }, 3000);
             }
-            
-            function setupEventListeners() {
-                // Navigation
-                document.querySelectorAll('.nav-item').forEach(item => {
-                    item.addEventListener('click', () => navigateTo(item.dataset.page));
-                });
+
+            function showLoadingState() {
+                // Add a loading overlay
+                const loadingHtml = `
+                    <div id="loading-overlay" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 2000;">
+                        <div style="background-color: var(--card-bg); padding: 2rem; border-radius: 0.5rem; display: flex; flex-direction: column; align-items: center;">
+                            <div class="loading-spinner"></div>
+                            <p style="margin-top: 1rem; color: var(--text-color);">Loading dashboard...</p>
+                        </div>
+                    </div>
+                `;
                 
-                // Mobile menu button
-                document.getElementById('mobile-menu-btn').addEventListener('click', toggleMobileMenu);
-                
-                // View all notes button
-                document.getElementById('view-all-notes').addEventListener('click', (e) => {
-                    e.preventDefault();
-                    navigateTo('notes');
-                });
-                
-                // Refresh system status button
-                document.getElementById('refresh-system-status').addEventListener('click', async () => {
-                    await loadSystemStatus();
-                    await loadGpuStats();
-                    updateSystemStatusUI();
-                    updateGpuMeters();
-                    showToast('System status refreshed', 'success');
-                });
-                
-                // Create note button
-                document.getElementById('create-note-btn').addEventListener('click', showCreateNoteModal);
-                
-                // Add memory button
-                document.getElementById('add-memory-btn').addEventListener('click', showAddMemoryModal);
-                
-                // Refresh memories button
-                document.getElementById('refresh-memories-btn').addEventListener('click', async () => {
-                    await loadCoreMemories();
-                    updateMemoriesTable();
-                    showToast('Memories refreshed', 'success');
-                });
-                
-                // Notes search 
-                document.getElementById('notes-search').addEventListener('input', (e) => {
-                    filterNotes(e.target.value);
-                });
-                
-                // System page refresh buttons
-                document.getElementById('refresh-system-btn').addEventListener('click', async () => {
-                    await Promise.all([
-                        loadSystemStatus(),
-                        loadSystemResources(),
-                        loadGpuStats()
-                    ]);
-                    updateSystemStatusUI();
-                    updateSystemResources();
-                    updateGpuMeters();
-                    showToast('System information refreshed', 'success');
-                });
-                
-                document.getElementById('refresh-log-btn').addEventListener('click', async () => {
-                    await loadSystemLog();
-                    showToast('System log refreshed', 'success');
-                });
-                document.getElementById('go-to-chat').addEventListener('click', function() {
-                    window.location.href = '/chat';
-                });
+                document.body.insertAdjacentHTML('beforeend', loadingHtml);
             }
-            
-            // Navigation Functions
-            function navigateTo(pageId) {
-                // Hide all pages
-                document.querySelectorAll('.page').forEach(page => {
-                    page.classList.remove('active');
-                });
-                
-                // Show selected page
-                document.getElementById(`${pageId}-page`).classList.add('active');
-                
-                // Update sidebar navigation
-                document.querySelectorAll('.nav-item').forEach(item => {
-                    item.classList.remove('active');
-                });
-                document.querySelector(`.nav-item[data-page="${pageId}"]`).classList.add('active');
-                
-                // Close mobile menu if open
-                document.getElementById('sidebar').classList.remove('active');
+
+            function hideLoadingState() {
+                // Remove loading overlay
+                const loadingOverlay = document.getElementById('loading-overlay');
+                if (loadingOverlay) {
+                    loadingOverlay.remove();
+                }
             }
-            
-            function toggleMobileMenu() {
-                document.getElementById('sidebar').classList.toggle('active');
-            }
-            
+
             // API Functions
+            async function fetchActiveModel() {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/models/mapping`);
+                    const data = await response.json();
+                    return data.default || 'llama3.3';
+                } catch (error) {
+                    console.error('Error fetching active model:', error);
+                    return 'llama3.3';
+                }
+            }
+
+            async function checkNeo4jDirectly() {
+                try {
+                    // Create a custom endpoint for this check if needed
+                    const response = await fetch('/v1/neo4j/check-direct');
+                    const data = await response.json();
+                    
+                    // Update the Neo4j status badge directly
+                    document.getElementById('neo4j-status-value').textContent = data.status;
+                    document.getElementById('system-neo4j-status').textContent = data.status;
+                    
+                    return data.status;
+                } catch (error) {
+                    console.error('Error checking Neo4j directly:', error);
+                    return 'Unknown';
+                }
+            }
+
             async function loadSystemStatus() {
                 try {
                     const response = await fetch('/health');
@@ -1303,7 +1285,7 @@
                     throw error;
                 }
             }
-            
+
             // Simplified loadGpuStats function that works reliably
             async function loadGpuStats() {
                 try {
@@ -1362,7 +1344,7 @@
                     return dashboardCache.gpuStats;
                 }
             }
-            
+
             async function loadSystemResources() {
                 try {
                     // This endpoint would need to be implemented on your server
@@ -1384,35 +1366,10 @@
                         ramUsed: 4,
                         ramTotal: 16
                     };
+                    return dashboardCache.systemResources;
                 }
             }
-            
-            async function loadModels() {
-                try {
-                    const response = await fetch(`${API_BASE_URL}/models`);
-                    const data = await response.json();
-                    
-                    dashboardCache.models = data.data || [];
-                    return data;
-                } catch (error) {
-                    console.error('Error loading models:', error);
-                    dashboardCache.models = [];
-                }
-            }
-            
-            async function loadSystemLog() {
-                try {
-                    const response = await fetch(`${API_BASE_URL}/system/log`);
-                    const data = await response.text();
-                    
-                    document.getElementById('system-log').textContent = data;
-                    return data;
-                } catch (error) {
-                    console.error('Error loading system log:', error);
-                    document.getElementById('system-log').textContent = 'Failed to load system log';
-                }
-            }
-            
+
             async function loadNotes() {
                 try {
                     const response = await fetch(`${API_BASE_URL}/notes`);
@@ -1426,7 +1383,7 @@
                     throw error;
                 }
             }
-            
+
             async function loadCoreMemories() {
                 try {
                     const response = await fetch(`${API_BASE_URL}/memory/core`);
@@ -1455,7 +1412,58 @@
                     throw error;
                 }
             }
-            
+
+            async function loadModels() {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/models`);
+                    const data = await response.json();
+                    
+                    dashboardCache.models = data.data || [];
+                    return data;
+                } catch (error) {
+                    console.error('Error loading models:', error);
+                    dashboardCache.models = [];
+                    return [];
+                }
+            }
+
+            async function loadSystemLog() {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/system/log`);
+                    const data = await response.text();
+                    
+                    document.getElementById('system-log').textContent = data;
+                    return data;
+                } catch (error) {
+                    console.error('Error loading system log:', error);
+                    document.getElementById('system-log').textContent = 'Failed to load system log';
+                    return 'Failed to load system log';
+                }
+            }
+
+            async function loadTokenStats() {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/stats/tokens`);
+                    const data = await response.json();
+                    
+                    dashboardCache.tokenStats = {
+                        systemTokens: data.system_tokens || 0,
+                        historyTokens: data.history_tokens || 0,
+                        totalTokens: data.total_tokens || 0
+                    };
+                    
+                    return data;
+                } catch (error) {
+                    console.error('Error loading token stats:', error);
+                    dashboardCache.tokenStats = {
+                        systemTokens: 0,
+                        historyTokens: 0,
+                        totalTokens: 0
+                    };
+                    return dashboardCache.tokenStats;
+                }
+            }
+
             async function createNote(title, content, tags = []) {
                 try {
                     const response = await fetch(`${API_BASE_URL}/notes`, {
@@ -1478,7 +1486,7 @@
                     throw error;
                 }
             }
-            
+
             async function deleteNote(noteId) {
                 try {
                     const response = await fetch(`${API_BASE_URL}/notes/${noteId}`, {
@@ -1497,7 +1505,7 @@
                     throw error;
                 }
             }
-            
+
             async function addCoreMemory(memory) {
                 try {
                     const response = await fetch(`${API_BASE_URL}/memory/core`, {
@@ -1520,7 +1528,7 @@
                     throw error;
                 }
             }
-            
+
             async function deleteMemory(index) {
                 try {
                     // First get all memories
@@ -1550,75 +1558,15 @@
                     throw error;
                 }
             }
-            
-            // Update the dashboard stats function to use combined GPU memory
-            function updateDashboardStats() {
-                // Update notes count
-                document.getElementById('total-notes-count').textContent = dashboardCache.notes.length;
-                document.getElementById('notes-last-updated').textContent = new Date().toLocaleTimeString();
-                
-                // Update core memories count
-                document.getElementById('core-memories-count').textContent = dashboardCache.coreMemories.length;
-                document.getElementById('memories-last-updated').textContent = new Date().toLocaleTimeString();
-                
-                // Update model info
-                fetchActiveModel().then(model => {
-                    document.getElementById('active-model').textContent = model;
-                });
-                
-                // Calculate combined GPU memory
-                let totalMemoryUsed = 0;
-                let totalMemoryTotal = 0;
-                
-                if (dashboardCache.gpuStats.gpus && dashboardCache.gpuStats.gpus.length > 0) {
-                    dashboardCache.gpuStats.gpus.forEach(gpu => {
-                        totalMemoryUsed += gpu.memory_used;
-                        totalMemoryTotal += gpu.memory_total;
-                    });
-                } else {
-                    // Fallback to primary GPU
-                    const primaryGpu = dashboardCache.gpuStats.primaryGpu || {};
-                    totalMemoryUsed = primaryGpu.memory_used || 0;
-                    totalMemoryTotal = primaryGpu.memory_total || 0;
-                }
-                
-                // Update GPU memory usage stat card with combined stats
-                const gpuUsage = `${totalMemoryUsed.toFixed(1)} GB / ${totalMemoryTotal.toFixed(1)} GB`;
-                document.getElementById('gpu-memory-usage').textContent = gpuUsage;
-                
-                // Show total GPU count if more than one
-                if (dashboardCache.gpuStats.totalGpus > 1) {
-                    document.getElementById('gpu-memory-usage').textContent += ` (${dashboardCache.gpuStats.totalGpus} GPUs)`;
-                }
+
+            // UI Update Functions
+            function updateStatusPill(id, status, text) {
+                const pill = document.getElementById(id);
+                pill.className = 'status-pill';
+                pill.classList.add(status);
+                pill.innerHTML = `<span class="status-indicator ${status}"></span> ${text}`;
             }
-            
-            async function fetchActiveModel() {
-                try {
-                    const response = await fetch(`${API_BASE_URL}/models/mapping`);
-                    const data = await response.json();
-                    return data.default || 'llama3.3';
-                } catch (error) {
-                    console.error('Error fetching active model:', error);
-                    return 'llama3.3';
-                }
-            }
-            async function checkNeo4jDirectly() {
-                try {
-                    // Create a custom endpoint for this check if needed
-                    const response = await fetch('/v1/neo4j/check-direct');
-                    const data = await response.json();
-                    
-                    // Update the Neo4j status badge directly
-                    document.getElementById('neo4j-status-value').textContent = data.status;
-                    document.getElementById('system-neo4j-status').textContent = data.status;
-                    
-                    return data.status;
-                } catch (error) {
-                    console.error('Error checking Neo4j directly:', error);
-                    return 'Unknown';
-                }
-            }
-            // Update the updateSystemStatusUI function to apply the correct class
+
             function updateSystemStatusUI() {
                 // Update status pills
                 updateStatusPill('server-status', dashboardCache.systemStatus.server === 'Online' ? 'success' : 'danger', 
@@ -1672,15 +1620,7 @@
                 document.getElementById('system-redis-status').textContent = dashboardCache.systemStatus.redis;
                 document.getElementById('system-neo4j-status').textContent = dashboardCache.systemStatus.neo4j;
             }
-            
-            function updateStatusPill(id, status, text) {
-                const pill = document.getElementById(id);
-                pill.className = 'status-pill';
-                pill.classList.add(status);
-                pill.innerHTML = `<span class="status-indicator ${status}"></span> ${text}`;
-            }
-            
-            // Modified updateGpuMeters function to show combined GPU usage
+
             function updateGpuMeters() {
                 // Calculate combined GPU stats
                 let totalMemoryUsed = 0;
@@ -1777,7 +1717,7 @@
                     }
                 }
             }
-            
+
             function updateSystemResources() {
                 // Update CPU usage meter
                 document.getElementById('cpu-usage-meter').style.width = `${dashboardCache.systemResources.cpuUsage}%`;
@@ -1789,7 +1729,71 @@
                 document.getElementById('ram-used').textContent = dashboardCache.systemResources.ramUsed.toFixed(1);
                 document.getElementById('ram-total').textContent = dashboardCache.systemResources.ramTotal.toFixed(1);
             }
-            
+
+            function updateTokenStats() {
+                document.getElementById('total-tokens-count').textContent = 
+                    dashboardCache.tokenStats.totalTokens.toLocaleString();
+                document.getElementById('system-tokens').textContent = 
+                    dashboardCache.tokenStats.systemTokens.toLocaleString();
+                document.getElementById('history-tokens').textContent = 
+                    dashboardCache.tokenStats.historyTokens.toLocaleString();
+                
+                // Also update the system page elements if they exist
+                const systemTotalTokens = document.getElementById('system-total-tokens');
+                const systemSystemTokens = document.getElementById('system-system-tokens');
+                const systemHistoryTokens = document.getElementById('system-history-tokens');
+                
+                if (systemTotalTokens) {
+                    systemTotalTokens.textContent = dashboardCache.tokenStats.totalTokens.toLocaleString();
+                }
+                if (systemSystemTokens) {
+                    systemSystemTokens.textContent = dashboardCache.tokenStats.systemTokens.toLocaleString();
+                }
+                if (systemHistoryTokens) {
+                    systemHistoryTokens.textContent = dashboardCache.tokenStats.historyTokens.toLocaleString();
+                }
+            }
+
+            function updateDashboardStats() {
+                // Update notes count
+                document.getElementById('total-notes-count').textContent = dashboardCache.notes.length;
+                document.getElementById('notes-last-updated').textContent = new Date().toLocaleTimeString();
+                
+                // Update core memories count
+                document.getElementById('core-memories-count').textContent = dashboardCache.coreMemories.length;
+                document.getElementById('memories-last-updated').textContent = new Date().toLocaleTimeString();
+                
+                // Update model info
+                fetchActiveModel().then(model => {
+                    document.getElementById('active-model').textContent = model;
+                });
+                
+                // Calculate combined GPU memory
+                let totalMemoryUsed = 0;
+                let totalMemoryTotal = 0;
+                
+                if (dashboardCache.gpuStats.gpus && dashboardCache.gpuStats.gpus.length > 0) {
+                    dashboardCache.gpuStats.gpus.forEach(gpu => {
+                        totalMemoryUsed += gpu.memory_used;
+                        totalMemoryTotal += gpu.memory_total;
+                    });
+                } else {
+                    // Fallback to primary GPU
+                    const primaryGpu = dashboardCache.gpuStats.primaryGpu || {};
+                    totalMemoryUsed = primaryGpu.memory_used || 0;
+                    totalMemoryTotal = primaryGpu.memory_total || 0;
+                }
+                
+                // Update GPU memory usage stat card with combined stats
+                const gpuUsage = `${totalMemoryUsed.toFixed(1)} GB / ${totalMemoryTotal.toFixed(1)} GB`;
+                document.getElementById('gpu-memory-usage').textContent = gpuUsage;
+                
+                // Show total GPU count if more than one
+                if (dashboardCache.gpuStats.totalGpus > 1) {
+                    document.getElementById('gpu-memory-usage').textContent += ` (${dashboardCache.gpuStats.totalGpus} GPUs)`;
+                }
+            }
+
             function updateRecentNotesTable() {
                 const table = document.getElementById('recent-notes-table');
                 const notesTable = document.getElementById('notes-table');
@@ -1863,7 +1867,7 @@
                     });
                 });
             }
-            
+
             function updateMemoriesTable() {
                 const memoriesTable = document.getElementById('memories-table');
                 
@@ -1901,7 +1905,7 @@
                     });
                 }
             }
-            
+
             function updateModelsTable() {
                 const modelsTable = document.getElementById('models-table');
                 
@@ -1921,8 +1925,7 @@
                         `;
                     });
                 }
-            }
-            
+            }   
             function filterNotes(searchTerm) {
                 const notesTable = document.getElementById('notes-table');
                 notesTable.innerHTML = '';
@@ -1977,7 +1980,7 @@
                     });
                 }
             }
-            
+
             // Modal Functions
             function showCreateNoteModal() {
                 const modalHtml = `
@@ -2047,7 +2050,7 @@
                     }
                 });
             }
-            
+
             function showAddMemoryModal() {
                 const modalHtml = `
                     <div class="modal-overlay" id="add-memory-modal">
@@ -2103,7 +2106,7 @@
                     }
                 });
             }
-            
+
             async function viewNote(noteId) {
                 try {
                     const response = await fetch(`${API_BASE_URL}/notes/${noteId}`);
@@ -2164,7 +2167,7 @@
                     showToast('Failed to load note', 'danger');
                 }
             }
-            
+
             function confirmDeleteNote(noteId) {
                 const modalHtml = `
                     <div class="modal-overlay" id="confirm-delete-modal">
@@ -2210,7 +2213,7 @@
                     }
                 });
             }
-            
+
             function confirmDeleteMemory(index) {
                 const memory = dashboardCache.coreMemories[index];
                 
@@ -2260,66 +2263,535 @@
                     }
                 });
             }
-            
-            // Utility Functions
-            function formatDate(dateString) {
-                if (!dateString) return 'Unknown';
-                
-                const date = new Date(dateString);
-                if (isNaN(date.getTime())) return dateString;
-                
-                return date.toLocaleString();
-            }
-            
-            function formatTags(tags) {
-                if (!tags || tags.length === 0) return '';
-                
-                return tags.map(tag => `<span class="tag">${tag}</span>`).join('');
-            }
-            
-            function showToast(message, type = 'success') {
-                const toastContainer = document.querySelector('.toast-container');
-                
-                // Create container if it doesn't exist
-                if (!toastContainer) {
-                    const container = document.createElement('div');
-                    container.className = 'toast-container';
-                    document.body.appendChild(container);
+
+            // Auto-refresh functions
+            function startAutoRefresh() {
+                if (autoRefreshTimerId) {
+                    clearInterval(autoRefreshTimerId);
                 }
                 
-                const toast = document.createElement('div');
-                toast.className = `toast toast-${type}`;
-                toast.innerHTML = message;
-                
-                document.querySelector('.toast-container').appendChild(toast);
-                
-                // Remove toast after 3 seconds
-                setTimeout(() => {
-                    toast.remove();
-                }, 3000);
+                if (autoRefreshEnabled) {
+                    autoRefreshTimerId = setInterval(async () => {
+                        // Only refresh the data that changes frequently
+                        try {
+                            await Promise.all([
+                                loadSystemStatus(),
+                                loadGpuStats(),
+                                loadSystemResources(),
+                                loadTokenStats()
+                            ]);
+                            
+                            // Update the UI components
+                            updateSystemStatusUI();
+                            updateGpuMeters();
+                            updateSystemResources();
+                            updateTokenStats();
+                            updateDashboardStats();
+                            
+                            // Update last refresh time
+                            updateLastRefreshTime();
+                        } catch (error) {
+                            console.error('Error during auto-refresh:', error);
+                        }
+                    }, autoRefreshInterval);
+                    
+                    console.log(`Auto-refresh started: refreshing every ${autoRefreshInterval/1000} seconds`);
+                }
             }
-            
-            function showLoadingState() {
-                // Add a loading overlay
-                const loadingHtml = `
-                    <div id="loading-overlay" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 2000;">
-                        <div style="background-color: var(--card-bg); padding: 2rem; border-radius: 0.5rem; display: flex; flex-direction: column; align-items: center;">
-                            <div class="loading-spinner"></div>
-                            <p style="margin-top: 1rem; color: var(--text-color);">Loading dashboard...</p>
+
+            function stopAutoRefresh() {
+                if (autoRefreshTimerId) {
+                    clearInterval(autoRefreshTimerId);
+                    autoRefreshTimerId = null;
+                    console.log('Auto-refresh stopped');
+                }
+            }
+
+            function toggleAutoRefresh() {
+                autoRefreshEnabled = !autoRefreshEnabled;
+                
+                if (autoRefreshEnabled) {
+                    startAutoRefresh();
+                    document.getElementById('auto-refresh-toggle').checked = true;
+                    showToast('Auto-refresh enabled', 'success');
+                } else {
+                    stopAutoRefresh();
+                    document.getElementById('auto-refresh-toggle').checked = false;
+                    showToast('Auto-refresh disabled', 'warning');
+                }
+                
+                // Update the button text
+                const buttonText = document.getElementById('auto-refresh-status');
+                if (buttonText) {
+                    buttonText.textContent = autoRefreshEnabled ? 'On' : 'Off';
+                }
+                
+                return autoRefreshEnabled;
+            }
+
+            function changeRefreshInterval(seconds) {
+                autoRefreshInterval = seconds * 1000;
+                
+                // Update the select element
+                const selectElement = document.getElementById('refresh-interval-select');
+                if (selectElement) {
+                    selectElement.value = seconds.toString();
+                }
+                
+                // If auto-refresh is enabled, restart the timer with the new interval
+                if (autoRefreshEnabled) {
+                    startAutoRefresh();
+                }
+                
+                showToast(`Refresh interval set to ${seconds} seconds`, 'success');
+                return autoRefreshInterval;
+            }
+
+            function updateLastRefreshTime() {
+                const refreshIndicator = document.getElementById('last-refresh-time');
+                if (refreshIndicator) {
+                    refreshIndicator.textContent = new Date().toLocaleTimeString();
+                    refreshIndicator.classList.add('refresh-flash');
+                    setTimeout(() => {
+                        refreshIndicator.classList.remove('refresh-flash');
+                    }, 1000);
+                }
+            }
+
+            function addAutoRefreshControls() {
+                // Create the auto-refresh controls
+                const controlsHtml = `
+                    <div class="refresh-status">
+                        <span>Last refreshed: <span id="last-refresh-time">${new Date().toLocaleTimeString()}</span></span>
+                    </div>
+                    <div class="refresh-controls">
+                        <div class="refresh-toggle">
+                            <label class="switch" title="Toggle auto-refresh">
+                                <input type="checkbox" id="auto-refresh-toggle" checked>
+                                <span class="slider"></span>
+                            </label>
+                            <span class="toggle-label">Auto-refresh: <span id="auto-refresh-status">On</span></span>
                         </div>
+                        <div class="refresh-interval">
+                            <label for="refresh-interval-select">Interval:</label>
+                            <select id="refresh-interval-select" class="form-input">
+                                <option value="10">10s</option>
+                                <option value="30" selected>30s</option>
+                                <option value="60">1m</option>
+                                <option value="300">5m</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-sm btn-secondary" id="manual-refresh-btn" title="Refresh now">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M23 4v6h-6"></path>
+                                <path d="M1 20v-6h6"></path>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                            </svg>
+                            Refresh Now
+                        </button>
                     </div>
                 `;
                 
-                document.body.insertAdjacentHTML('beforeend', loadingHtml);
-            }
-            
-            function hideLoadingState() {
-                // Remove loading overlay
-                const loadingOverlay = document.getElementById('loading-overlay');
-                if (loadingOverlay) {
-                    loadingOverlay.remove();
+                // Find the top bar and insert the controls
+                const topBar = document.querySelector('.top-bar');
+                if (topBar) {
+                    // Add the styles for the controls
+                    const styleElement = document.createElement('style');
+                    styleElement.textContent = `
+                        .auto-refresh-controls {
+                            margin-left: auto;
+                            display: flex;
+                            align-items: center;
+                            gap: 1rem;
+                        }
+                        
+                        .refresh-status {
+                            color: var(--muted-color);
+                            font-size: 0.875rem;
+                        }
+                        
+                        .refresh-controls {
+                            display: flex;
+                            align-items: center;
+                            gap: 1rem;
+                        }
+                        
+                        .refresh-toggle {
+                            display: flex;
+                            align-items: center;
+                            gap: 0.5rem;
+                        }
+                        
+                        .toggle-label {
+                            font-size: 0.875rem;
+                        }
+                        
+                        .refresh-interval {
+                            display: flex;
+                            align-items: center;
+                            gap: 0.5rem;
+                            font-size: 0.875rem;
+                        }
+                        
+                        .refresh-interval select {
+                            padding: 0.25rem 0.5rem;
+                            border-radius: 0.25rem;
+                            background-color: var(--input-bg);
+                            color: var(--text-color);
+                            border: 1px solid var(--border-color);
+                            font-size: 0.75rem;
+                        }
+                        
+                        .refresh-flash {
+                            animation: flash 1s;
+                        }
+                        
+                        @keyframes flash {
+                            0% { color: var(--accent-color); }
+                            100% { color: var(--muted-color); }
+                        }
+                        
+                        @media (max-width: 1200px) {
+                            .auto-refresh-controls {
+                                flex-direction: column;
+                                align-items: flex-end;
+                                gap: 0.5rem;
+                            }
+                            
+                            .refresh-controls {
+                                flex-wrap: wrap;
+                                justify-content: flex-end;
+                            }
+                        }
+                        
+                        @media (max-width: 768px) {
+                            .auto-refresh-controls {
+                                display: none;
+                            }
+                            
+                            /* Add a floating refresh button for mobile */
+                            .mobile-refresh-button {
+                                position: fixed;
+                                bottom: 1rem;
+                                right: 1rem;
+                                background-color: var(--accent-color);
+                                color: white;
+                                width: 3rem;
+                                height: 3rem;
+                                border-radius: 50%;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+                                z-index: 100;
+                                cursor: pointer;
+                                transition: background-color 0.2s;
+                            }
+                            
+                            .mobile-refresh-button:hover {
+                                background-color: var(--accent-hover);
+                            }
+                            
+                            .mobile-refresh-button svg {
+                                width: 1.5rem;
+                                height: 1.5rem;
+                            }
+                            
+                            .mobile-refresh-button.refreshing svg {
+                                animation: spin 1s linear infinite;
+                            }
+                            
+                            @keyframes spin {
+                                0% { transform: rotate(0deg); }
+                                100% { transform: rotate(360deg); }
+                            }
+                        }
+                    `;
+                    document.head.appendChild(styleElement);
+                    
+                    // Create container for auto-refresh controls
+                    const controlsContainer = document.createElement('div');
+                    controlsContainer.className = 'auto-refresh-controls';
+                    controlsContainer.innerHTML = controlsHtml;
+                    
+                    // Insert after the status pills
+                    const statusPills = topBar.querySelector('.status-pills');
+                    if (statusPills) {
+                        statusPills.insertAdjacentElement('afterend', controlsContainer);
+                    } else {
+                        topBar.appendChild(controlsContainer);
+                    }
+                    
+                    // Add a floating refresh button for mobile
+                    const mobileButton = document.createElement('div');
+                    mobileButton.className = 'mobile-refresh-button';
+                    mobileButton.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M23 4v6h-6"></path>
+                            <path d="M1 20v-6h6"></path>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                        </svg>
+                    `;
+                    document.body.appendChild(mobileButton);
+                    
+                    // Add event listeners
+                    document.getElementById('auto-refresh-toggle').addEventListener('change', toggleAutoRefresh);
+                    
+                    document.getElementById('refresh-interval-select').addEventListener('change', function() {
+                        changeRefreshInterval(parseInt(this.value));
+                    });
+                    
+                    document.getElementById('manual-refresh-btn').addEventListener('click', async function() {
+                        this.disabled = true;
+                        
+                        try {
+                            // Show loading spinner
+                            const originalContent = this.innerHTML;
+                            this.innerHTML = `
+                                <div class="loading-spinner" style="width: 14px; height: 14px;"></div>
+                                Refreshing...
+                            `;
+                            
+                            // Perform the refresh
+                            await Promise.all([
+                                loadSystemStatus(),
+                                loadGpuStats(),
+                                loadSystemResources(),
+                                loadTokenStats()
+                            ]);
+                            
+                            // Update the UI
+                            updateSystemStatusUI();
+                            updateGpuMeters();
+                            updateSystemResources();
+                            updateTokenStats();
+                            updateDashboardStats();
+                            
+                            // Update last refresh time
+                            updateLastRefreshTime();
+                            
+                            // Show success toast
+                            showToast('Dashboard refreshed', 'success');
+                        } catch (error) {
+                            console.error('Error refreshing dashboard:', error);
+                            showToast('Failed to refresh dashboard', 'danger');
+                        } finally {
+                            // Restore button
+                            this.innerHTML = originalContent;
+                            this.disabled = false;
+                        }
+                    });
+                    
+                    // Mobile button event listener
+                    mobileButton.addEventListener('click', async function() {
+                        // Show loading animation
+                        this.classList.add('refreshing');
+                        
+                        try {
+                            // Perform the refresh
+                            await Promise.all([
+                                loadSystemStatus(),
+                                loadGpuStats(),
+                                loadSystemResources(),
+                                loadTokenStats()
+                            ]);
+                            
+                            // Update the UI
+                            updateSystemStatusUI();
+                            updateGpuMeters();
+                            updateSystemResources();
+                            updateTokenStats();
+                            updateDashboardStats();
+                            
+                            // Update last refresh time
+                            updateLastRefreshTime();
+                            
+                            // Show success toast
+                            showToast('Dashboard refreshed', 'success');
+                        } catch (error) {
+                            console.error('Error refreshing dashboard:', error);
+                            showToast('Failed to refresh dashboard', 'danger');
+                        } finally {
+                            // Remove loading animation
+                            this.classList.remove('refreshing');
+                        }
+                    });
                 }
             }
+
+            // Add page visibility event listeners to pause auto-refresh when the page is not visible
+            document.addEventListener('visibilitychange', function() {
+                if (document.visibilityState === 'hidden' && autoRefreshEnabled) {
+                    // Stop the refresh timer when the page is not visible to save resources
+                    stopAutoRefresh();
+                    console.log('Auto-refresh paused: page not visible');
+                } else if (document.visibilityState === 'visible' && autoRefreshEnabled) {
+                    // Restart the refresh timer when the page becomes visible again
+                    startAutoRefresh();
+                    console.log('Auto-refresh resumed: page visible');
+                }
+            });
+
+            // Navigation Functions
+            function navigateTo(pageId) {
+                // Hide all pages
+                document.querySelectorAll('.page').forEach(page => {
+                    page.classList.remove('active');
+                });
+                
+                // Show selected page
+                document.getElementById(`${pageId}-page`).classList.add('active');
+                
+                // Update sidebar navigation
+                document.querySelectorAll('.nav-item').forEach(item => {
+                    item.classList.remove('active');
+                });
+                document.querySelector(`.nav-item[data-page="${pageId}"]`).classList.add('active');
+                
+                // Close mobile menu if open
+                document.getElementById('sidebar').classList.remove('active');
+            }
+
+            function toggleMobileMenu() {
+                document.getElementById('sidebar').classList.toggle('active');
+            }
+
+            // Initialize dashboard on page load
+            async function initializeDashboard() {
+                showLoadingState();
+                
+                try {
+                    // Load data concurrently
+                    await Promise.all([
+                        loadSystemStatus(),
+                        loadGpuStats(),
+                        loadSystemResources(),
+                        loadNotes(),
+                        loadCoreMemories(),
+                        loadModels(),
+                        loadSystemLog(),
+                        loadTokenStats()
+                    ]);
+                    
+                    // Update UI components
+                    updateDashboardStats();
+                    updateTokenStats();
+                    updateSystemStatusUI();
+                    updateRecentNotesTable();
+                    updateGpuMeters();
+                    updateSystemResources();
+                    updateMemoriesTable();
+                    updateModelsTable();
+                    
+                    // Show success toast
+                    showToast('Dashboard loaded successfully', 'success');
+                } catch (error) {
+                    console.error('Error initializing dashboard:', error);
+                    showToast('Failed to load dashboard data', 'danger');
+                }
+                
+                hideLoadingState();
+            }
+
+            // Set up event listeners
+            function setupEventListeners() {
+                // Navigation
+                document.querySelectorAll('.nav-item').forEach(item => {
+                    if (item.dataset.page) {
+                        item.addEventListener('click', () => navigateTo(item.dataset.page));
+                    }
+                });
+                
+                // Mobile menu button
+                document.getElementById('mobile-menu-btn').addEventListener('click', toggleMobileMenu);
+                
+                // View all notes button
+                document.getElementById('view-all-notes').addEventListener('click', (e) => {
+                    e.preventDefault();
+                    navigateTo('notes');
+                });
+                
+                // Refresh system status button
+                document.getElementById('refresh-system-status').addEventListener('click', async () => {
+                    await loadSystemStatus();
+                    await loadGpuStats();
+                    await loadTokenStats();
+                    updateSystemStatusUI();
+                    updateGpuMeters();
+                    updateTokenStats();
+                    showToast('System status refreshed', 'success');
+                    
+                    // Update last refresh time
+                    updateLastRefreshTime();
+                });
+                
+                // Create note button
+                document.getElementById('create-note-btn').addEventListener('click', showCreateNoteModal);
+                
+                // Add memory button
+                document.getElementById('add-memory-btn').addEventListener('click', showAddMemoryModal);
+                
+                // Refresh memories button
+                document.getElementById('refresh-memories-btn').addEventListener('click', async () => {
+                    await loadCoreMemories();
+                    updateMemoriesTable();
+                    showToast('Memories refreshed', 'success');
+                    
+                    // Update last refresh time
+                    updateLastRefreshTime();
+                });
+                
+                // Notes search 
+                document.getElementById('notes-search').addEventListener('input', (e) => {
+                    filterNotes(e.target.value);
+                });
+                
+                // System page refresh buttons
+                document.getElementById('refresh-system-btn').addEventListener('click', async () => {
+                    await Promise.all([
+                        loadSystemStatus(),
+                        loadSystemResources(),
+                        loadGpuStats(),
+                        loadTokenStats()
+                    ]);
+                    updateSystemStatusUI();
+                    updateSystemResources();
+                    updateGpuMeters();
+                    updateTokenStats();
+                    showToast('System information refreshed', 'success');
+                    
+                    // Update last refresh time
+                    updateLastRefreshTime();
+                });
+
+                document.getElementById('refresh-log-btn').addEventListener('click', async () => {
+                    await loadSystemLog();
+                    showToast('System log refreshed', 'success');
+                    
+                    // Update last refresh time
+                    updateLastRefreshTime();
+                });
+                
+                // Go to chat button
+                document.getElementById('go-to-chat').addEventListener('click', function() {
+                    window.location.href = '/chat';
+                });
+            }
+
+            // Entry point - initialize the dashboard when the DOM is loaded
+            document.addEventListener('DOMContentLoaded', function() {
+                // Add auto-refresh controls
+                addAutoRefreshControls();
+                
+                // Initialize the dashboard
+                initializeDashboard();
+                
+                // Set up event listeners
+                setupEventListeners();
+                
+                // Start auto-refresh
+                startAutoRefresh();
+            });
             </script>
             </body>
             </html>
