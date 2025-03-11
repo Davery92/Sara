@@ -68,11 +68,11 @@ app.add_middleware(
 NOTES_DIRECTORY = "/home/david/Sara/notes"
 
 MESSAGE_HISTORY = []
-MAX_HISTORY = 30  # Maximum number of messages (excluding system prompt)
+MAX_HISTORY = 60  # Maximum number of messages (excluding system prompt)
 
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
-
+SKIP_TOOL_FOLLOWUP = True
 
 # Initialize Perplexica client
 perplexica = PerplexicaClient(base_url="http://localhost:3001")
@@ -1044,116 +1044,6 @@ class ConversationBuffer:
 # Initialize the conversation buffer
 conversation_buffer = ConversationBuffer(max_buffer_size=10)
 
-async def summarize_buffer_and_update_profile(conversation_id):
-    """
-    Summarize the conversation buffer and update the user profile
-    This function should be called as a background task
-    """
-    # Skip if summarization is already in progress for this conversation
-    if conversation_buffer.is_summarization_in_progress(conversation_id):
-        logger.info(f"Summarization already in progress for conversation {conversation_id}")
-        return
-    
-    # Mark summarization as started
-    conversation_buffer.mark_summarization_started(conversation_id)
-    
-    try:
-        # Get messages from buffer
-        buffer_messages = conversation_buffer.get_messages(conversation_id)
-        
-        if not buffer_messages or len(buffer_messages) < 3:  # Minimum threshold for summarization
-            logger.info(f"Not enough messages in buffer for summarization: {len(buffer_messages)}")
-            conversation_buffer.mark_summarization_completed(conversation_id)
-            return
-        
-        logger.info(f"Summarizing buffer with {len(buffer_messages)} messages for conversation {conversation_id}")
-        
-        # Format conversation for the model
-        formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in buffer_messages])
-        
-        # Create a prompt specific to user profile extraction
-        extract_prompt = """
-        Based on this conversation segment, extract key information about the user such as:
-        1. Preferences and interests
-        2. Personal details they've shared
-        3. Opinions or values they've expressed
-        4. Any other relevant information for building a user profile
-        
-        Provide this information in a structured list format that could be added to a user profile.
-        Focus only on new information, not what was already known.
-        """
-        
-        # Make model request for extraction
-        extract_messages = [
-            {'role': 'system', 'content': extract_prompt},
-            {'role': 'user', 'content': formatted_convo}
-        ]
-        
-        # Get extraction using non-streaming request
-        response = await fetch_ollama_response(extract_messages, "command-r7b", stream=False)
-        
-        if 'message' in response and 'content' in response['message']:
-            new_info = response['message']['content']
-            
-            # Check if new information was extracted
-            if "no new information" in new_info.lower() or "not enough information" in new_info.lower():
-                logger.info(f"No new user information extracted from conversation {conversation_id}")
-            else:
-                # Update the single user profile in the notes directory
-                profile_id = "user_profile"
-                existing_profile = read_note(profile_id)
-                
-                if "error" in existing_profile:
-                    # Create new profile if it doesn't exist
-                    logger.info("Creating new user profile")
-                    create_note(
-                        title="User Profile",
-                        content=f"# User Profile\nCreated: {datetime.now().strftime('%Y-%m-%d')}\n\n{new_info}",
-                        tags=["user_profile"]
-                    )
-                else:
-                    # Append to existing profile
-                    logger.info("Updating user profile")
-                    append_note(
-                        profile_id,
-                        f"\n\n## Updated {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{new_info}"
-                    )
-                
-                logger.info("User profile updated with new information")
-        
-        # Also generate a summary of this conversation segment
-        summary_prompt = "Summarize the key points of this conversation segment in 2-3 sentences."
-        summary_messages = [
-            {'role': 'system', 'content': summary_prompt},
-            {'role': 'user', 'content': formatted_convo}
-        ]
-        
-        summary_response = await fetch_ollama_response(summary_messages, "llama3.1", stream=False)
-        
-        if 'message' in summary_response and 'content' in summary_response['message']:
-            summary = summary_response['message']['content']
-            
-            # Store this summary with a special tag
-            today = datetime.now()
-            summary_id = f"summary-segment-{conversation_id}-{today.strftime('%Y%m%d%H%M%S')}"
-            
-            message_store.store_message(
-                role='system',
-                content=summary,
-                conversation_id=summary_id,
-                date=today,
-                embedding=text_to_embedding_ollama(summary)['embeddings']
-            )
-            
-            logger.info(f"Stored segment summary: {summary_id}")
-    except Exception as e:
-        logger.error(f"Error in summarization process: {str(e)}")
-        logger.exception(e)
-    finally:
-        # Clear the buffer and mark summarization as completed
-        conversation_buffer.clear_buffer(conversation_id)
-        conversation_buffer.mark_summarization_completed(conversation_id)
-
 
 
 async def maybe_summarize_conversation(conversation_id):
@@ -1163,77 +1053,7 @@ async def maybe_summarize_conversation(conversation_id):
         return await summarize_conversation(conversation_id)
     return None
 
-def add_message_to_conversation(conversation_id, role, content):
-    """
-    Add a message to conversation history, maintaining 10-message limit.
-    Only user and assistant messages are stored, not tool calls.
-    The oldest message is removed when the limit is reached.
-    """
-    try:
-        # Get current conversation messages
-        current_messages = message_store.get_messages_by_conversation(conversation_id)
-        
-        # Skip if it's a tool message
-        if role == 'tool':
-            logger.info(f"Skipping storage of tool message in conversation {conversation_id}")
-            return None
-        
-        # Ensure content is a string
-        if not isinstance(content, str):
-            try:
-                content = str(content)
-            except Exception as e:
-                logger.error(f"Failed to convert content to string: {str(e)}")
-                content = "Error: Could not convert content to string"
-        
-        today = datetime.now()
-        
-        # Generate embedding for the message
-        embedding = text_to_embedding_ollama(content)['embeddings']
-        
-        # Store the new message
-        logger.info(f"Adding {role} message to conversation {conversation_id}")
-        message_id = message_store.store_message(
-            role=role,
-            content=content,
-            conversation_id=conversation_id,
-            date=today,
-            embedding=embedding
-        )
-        
-        # Add to conversation buffer for background processing
-        conversation_buffer.add_message(
-            conversation_id=conversation_id,
-            message={
-                'role': role,
-                'content': content,
-                'timestamp': today.timestamp()
-            }
-        )
-        
-        # If we now have more than 10 messages, remove the oldest one
-        if len(current_messages) >= 15:
-            logger.info(f"Conversation {conversation_id} has reached the 10-message limit, removing oldest")
-            
-            # Sort messages by timestamp
-            sorted_messages = sorted(current_messages, key=lambda x: x.get('timestamp', 0))
-            
-            # Get the oldest message
-            oldest_message = sorted_messages[0]
-            
-            # Delete the oldest message
-            try:
-                # Construct the message key format based on your Redis implementation
-                oldest_key = f"message:{conversation_id}:{oldest_message['role']}:{oldest_message['timestamp']}"
-                message_store.message_store.delete(oldest_key)
-                logger.info(f"Deleted oldest message with key {oldest_key}")
-            except Exception as e:
-                logger.error(f"Error deleting oldest message: {str(e)}")
-        
-        return message_id
-    except Exception as e:
-        logger.error(f"Error in add_message_to_conversation: {str(e)}")
-        return None
+
 
 def list_notes() -> List[Dict[str, Any]]:
     """List all available notes with metadata"""
@@ -2007,69 +1827,49 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                         response_data = json.loads(chunk_str)
                         logger.debug(f"Received chunk: {chunk_str}")
                         
-                                                        # Handle different types of responses
+                        # Handle different types of responses
                         # Case 1: Tool calls in the response
                         if 'message' in response_data and 'tool_calls' in response_data['message']:
                             logger.info(f"Tool call detected in response")
+                            
+                            # Don't yield the tool call message directly
+                            # Instead, process it and make a follow-up request with the results
+                            
                             tool_outputs = await process_tool_calls(response_data)
                             
                             if tool_outputs:
                                 logger.info(f"Processed tool outputs: {tool_outputs}")
                                 
-                                # Find the last user message
-                                last_user_message = None
-                                for i in range(len(messages) - 1, -1, -1):
-                                    if messages[i]['role'] == 'user':
-                                        last_user_message = messages[i]
-                                        break
+                                # Create a new messages array for follow-up that doesn't include the user's message again
+                                # This is the key change - only include the relevant context for the follow-up
                                 
-                                if not last_user_message:
-                                    logger.warning("No user message found in history to use for follow-up")
-                                    # Use a default message if none found
-                                    last_user_message = {'role': 'user', 'content': 'Please continue based on the tool results.'}
+                                # Start with a system message to establish context
+                                follow_up_messages = [
+                                    {'role': 'system', 'content': 'Continue based on the tool results. Do not repeat the initial response.'}
+                                ]
                                 
-                                # Create a new messages array for follow-up
-                                follow_up_messages = []
+                                # Add assistant's message with the tool calls
+                                if 'message' in response_data:
+                                    follow_up_messages.append({
+                                        'role': 'assistant',
+                                        'content': response_data['message'].get('content', ''),
+                                        'tool_calls': response_data['message'].get('tool_calls', [])
+                                    })
                                 
-                                # Check if any of the tool calls was 'send_message'
-                                send_message_tool_used = False
+                                # Add tool outputs to conversation history
                                 for tool_output in tool_outputs:
-                                    if tool_output.get('name') == 'send_message':
-                                        send_message_tool_used = True
-                                        break
+                                    follow_up_messages.append(tool_output)
                                 
-                                # If send_message tool was used, use the original messages up to the user message
-                                if send_message_tool_used:
-                                    logger.info("send_message tool detected - using original user message for follow-up")
-                                    
-                                    # Add all messages up to and including the last user message
-                                    user_message_found = False
-                                    for msg in messages:
-                                        follow_up_messages.append(msg)
-                                        
-                                        # If we've just added the last user message, stop here
-                                        if msg['role'] == 'user' and msg == last_user_message:
-                                            user_message_found = True
-                                            break
-                                    
-                                    # Fallback if user message not found
-                                    if not user_message_found:
-                                        follow_up_messages = messages.copy()
-                                else:
-                                    # For other tools, add all original messages plus tool outputs
-                                    follow_up_messages = messages.copy()
-                                    # Add tool outputs to conversation history if not using send_message
-                                    for tool_output in tool_outputs:
-                                        follow_up_messages.append(tool_output)
-                                
-                                # Send a follow-up request
+                                # Send a follow-up request with only the tool context
                                 follow_up_data = {
                                     'model': local_model,
                                     'messages': follow_up_messages,
                                     'stream': True
                                 }
                                 
-                                logger.info(f"Sending follow-up request after tool calls")
+                                logger.info(f"Sending focused follow-up request after tool calls")
+                                logger.debug(f"Follow-up messages: {json.dumps(follow_up_messages)}")
+                                
                                 async with session.post(url, json=follow_up_data) as follow_up_response:
                                     follow_up_response.raise_for_status()
                                     async for follow_up_chunk in follow_up_response.content:
@@ -2080,10 +1880,12 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                                         if follow_up_str:
                                             yield format_sse_message(follow_up_str)
                             else:
-                                # No tool outputs, just yield the chunk
+                                # No tool outputs, so just yield the original response
                                 yield format_sse_message(chunk_str)
                         
-                        # Case 2: Direct text response (non-tool response)
+                        # Case 2: Regular responses (non-tool responses)
+                        
+                            # For regular responses, just yield the chunk
                         elif 'message' in response_data and 'content' in response_data['message']:
                             logger.info("Regular message response detected - sending follow-up request for consistency")
                             
@@ -2104,11 +1906,6 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                                     follow_up_str = follow_up_chunk.decode('utf-8').strip()
                                     if follow_up_str:
                                         yield format_sse_message(follow_up_str)
-                        
-                        # Case 3: Other response formats (including 'done' messages)
-                        else:
-                            # For other response formats, just yield the chunk
-                            yield format_sse_message(chunk_str)
                             
                     except json.JSONDecodeError:
                         logger.warning(f"JSON decode error for chunk: {chunk_str}")
@@ -2162,7 +1959,7 @@ async def fetch_ollama_response(messages, model, tools=None):
             raise HTTPException(status_code=500, detail=error_msg)
 
 # Define a new function to manage the conversation window
-def manage_conversation_window(conversation_id, max_history=30):
+def manage_conversation_window(conversation_id, max_history=60):
     """
     Retrieve the last N messages from a conversation to use as context.
     If there are more than max_history messages, oldest messages will be excluded.
@@ -3134,7 +2931,44 @@ async def get_gpu_usage():
             "utilization": 30,  # Default value
             "error": str(e)
         }
-    
+
+@app.post("/v1/clear-conversation")
+async def clear_conversation(request: dict = Body(...)):
+    """Clear the conversation history for a specific conversation ID"""
+    try:
+        conversation_id = request.get("conversation_id", "current_session")
+        logger.info(f"Clearing conversation history for conversation_id: {conversation_id}")
+        
+        # Use the existing clear_conversation_history function if clearing the in-memory history
+        if conversation_id == "current_session" or conversation_id == "primary_conversation":
+            clear_conversation_history()
+            logger.info("In-memory conversation history cleared")
+        
+        # If using Redis/message store, attempt to delete messages for the conversation
+        if message_store:
+            try:
+                # This will use the delete_conversation method if implemented
+                if hasattr(message_store, 'delete_conversation') and callable(getattr(message_store, 'delete_conversation')):
+                    success = message_store.delete_conversation(conversation_id)
+                    logger.info(f"Deleted conversation {conversation_id} from message store: {success}")
+                # Alternative approach using direct Redis commands if available
+                elif hasattr(message_store, 'message_store') and hasattr(message_store.message_store, 'keys'):
+                    # Get all keys for this conversation
+                    pattern = f"message:{conversation_id}:*"
+                    keys = message_store.message_store.keys(pattern)
+                    if keys:
+                        # Delete all keys
+                        message_store.message_store.delete(*keys)
+                        logger.info(f"Deleted {len(keys)} messages for conversation {conversation_id}")
+            except Exception as e:
+                logger.error(f"Error deleting conversation from message store: {str(e)}")
+                # We continue even if there's an error with the message store
+        
+        return {"status": "success", "message": f"Conversation {conversation_id} cleared"}
+    except Exception as e:
+        logger.error(f"Error clearing conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error clearing conversation: {str(e)}")
+
 @app.get("/v1/neo4j/check-direct")
 async def check_neo4j_direct():
     """Direct endpoint to check Neo4j connection"""
@@ -3163,9 +2997,14 @@ async def check_neo4j_direct():
 async def get_token_stats():
     """Get current token statistics for the dashboard"""
     try:
-        # Get the stats from Redis
-        # Fix: message_store directly has the client attribute
-        token_stats_json = message_store.client.redis_client.get("token_stats")
+        # Try to get the stats from Redis
+        token_stats_json = None
+        if hasattr(message_store, 'client') and hasattr(message_store.client, 'redis_client'):
+            token_stats_json = message_store.client.redis_client.get("token_stats")
+        elif hasattr(message_store, 'message_store'):
+            token_stats_json = message_store.message_store.get("token_stats")
+        elif hasattr(message_store, 'redis_client'):
+            token_stats_json = message_store.redis_client.get("token_stats")
         
         if token_stats_json:
             if isinstance(token_stats_json, bytes):
@@ -3177,16 +3016,26 @@ async def get_token_stats():
             # Calculate current stats if not in Redis
             _, token_stats = get_messages_with_system_prompt()
         
-        return token_stats
+        # Ensure the response has all the expected fields
+        response = {
+            'total_tokens': token_stats.get('total_tokens', 0),
+            'system_tokens': token_stats.get('system_tokens', 0),
+            'history_tokens': token_stats.get('history_tokens', 0),
+            'token_limit': 100000,  # Default limit
+            'remaining_tokens': 100000 - token_stats.get('total_tokens', 0)
+        }
+        
+        return response
     except Exception as e:
         logger.error(f"Error retrieving token stats: {str(e)}")
-        # Return default stats - fixing the 'a' variable typo
+        # Return default stats if there's an error
         return {
+            'total_tokens': 0,
             'system_tokens': 0,
             'history_tokens': 0,
-            'total_tokens': 0  # Fixed: replaced 'a' with 0
+            'token_limit': 100000,
+            'remaining_tokens': 100000
         }
-
 
 
 @app.get("/health", status_code=200)
