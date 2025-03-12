@@ -9,3 +9,5 @@ test-scripts/
 json_contexts/
 json_outputs/
 json_raw/
+data-dump/
+sara-desktop/node_modules
