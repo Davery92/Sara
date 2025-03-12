@@ -1774,7 +1774,7 @@ async def process_tool_calls(response_data: dict) -> dict:
     return tool_outputs
 
 # API request processing
-async def send_to_ollama_api(messages, model, tools=None, stream=True):
+async def send_to_ollama_api(messages, model, tools=None, stream=True, user_query=None, is_follow_up=False):
     """Streaming API function - use only for streaming responses"""
     async with aiohttp.ClientSession() as session:
         # Map OpenAI model to local model
@@ -1807,7 +1807,7 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
         # Get the appropriate URL based on the model
         url = MODEL_URLS.get(local_model, MODEL_URLS["default"])
         
-        logger.info(f"Sending streaming request to Ollama at {url} with model {local_model}")
+        logger.info(f"Sending {'follow-up' if is_follow_up else 'initial'} streaming request to Ollama at {url} with model {local_model}")
         logger.debug(f"Request data: {json.dumps(data)}")
         
         try:
@@ -1827,6 +1827,11 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                         response_data = json.loads(chunk_str)
                         logger.debug(f"Received chunk: {chunk_str}")
                         
+                        # If this is already a follow-up response, just yield it without further processing
+                        if is_follow_up:
+                            yield format_sse_message(chunk_str)
+                            continue
+                        
                         # Handle different types of responses
                         # Case 1: Tool calls in the response
                         if 'message' in response_data and 'tool_calls' in response_data['message']:
@@ -1840,53 +1845,59 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                             if tool_outputs:
                                 logger.info(f"Processed tool outputs: {tool_outputs}")
                                 
-                                # Create a new messages array for follow-up that doesn't include the user's message again
-                                # This is the key change - only include the relevant context for the follow-up
+                                # Get the most recent user query if it wasn't passed explicitly
+                                original_query = user_query
+                                if not original_query:
+                                    # Reverse the messages list to find the most recent user message
+                                    for msg in reversed(messages):
+                                        if msg.get('role') == 'user':
+                                            original_query = msg.get('content', '')
+                                            logger.info(original_query)
+                                            break
                                 
-                                # Start with a system message to establish context
+                                # Format tool results for the system prompt
+                                tool_results = ""
+                                for output in tool_outputs:
+                                    if output.get('role') == 'tool' and 'content' in output:
+                                        tool_name = output.get('tool_call_id', 'unknown_tool')
+                                        tool_results += f"Tool: {tool_name}\n"
+                                        tool_results += f"Result: {output['content']}\n\n"
+                                
+                                # Read the tool system prompt template
+                                try:
+                                    with open('tool_system_prompt.txt', 'r') as f:
+                                        system_prompt_template = f.read()
+                                    
+                                    # Replace placeholders in the template
+                                    system_prompt = system_prompt_template.replace("{{user_query}}", original_query)
+                                    system_prompt = system_prompt.replace("{{tool_results}}", tool_results)
+                                    
+                                except Exception as e:
+                                    logger.error(f"Error reading tool system prompt: {str(e)}")
+                                    system_prompt = f"Continue based on the tool results for query: {original_query}\nTool results: {tool_results}\nDo not repeat the initial response."
+                                
+                                # Create follow-up messages with the proper system prompt
                                 follow_up_messages = [
-                                    {'role': 'system', 'content': 'Continue based on the tool results. Do not repeat the initial response.'}
+                                    {'role': 'system', 'content': system_prompt}
                                 ]
                                 
-                                # Add assistant's message with the tool calls
-                                if 'message' in response_data:
-                                    follow_up_messages.append({
-                                        'role': 'assistant',
-                                        'content': response_data['message'].get('content', ''),
-                                        'tool_calls': response_data['message'].get('tool_calls', [])
-                                    })
-                                
-                                # Add tool outputs to conversation history
-                                for tool_output in tool_outputs:
-                                    follow_up_messages.append(tool_output)
-                                
-                                # Send a follow-up request with only the tool context
-                                follow_up_data = {
-                                    'model': local_model,
-                                    'messages': follow_up_messages,
-                                    'stream': True
-                                }
-                                
-                                logger.info(f"Sending focused follow-up request after tool calls")
-                                logger.debug(f"Follow-up messages: {json.dumps(follow_up_messages)}")
-                                
-                                async with session.post(url, json=follow_up_data) as follow_up_response:
-                                    follow_up_response.raise_for_status()
-                                    async for follow_up_chunk in follow_up_response.content:
-                                        if not follow_up_chunk:
-                                            continue
-                                        
-                                        follow_up_str = follow_up_chunk.decode('utf-8').strip()
-                                        if follow_up_str:
-                                            yield format_sse_message(follow_up_str)
+                                # Send a follow-up request with the tool context, passing is_follow_up=True
+                                # This will prevent recursive follow-up requests
+                                async for follow_up_chunk in send_to_ollama_api(
+                                    follow_up_messages, 
+                                    model, 
+                                    tools=None, 
+                                    stream=True, 
+                                    user_query=original_query,
+                                    is_follow_up=True  # Mark this as a follow-up request
+                                ):
+                                    yield follow_up_chunk
                             else:
                                 # No tool outputs, so just yield the original response
                                 yield format_sse_message(chunk_str)
                         
                         # Case 2: Regular responses (non-tool responses)
-                        
-                            # For regular responses, just yield the chunk
-                        elif 'message' in response_data and 'content' in response_data['message']:
+                        else:
                             logger.info("Regular message response detected - sending follow-up request for consistency")
                             
                             # Use the same approach as with tool calls for consistency:
@@ -1915,7 +1926,6 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
             error_msg = f"An error occurred: {str(e)}"
             logger.error(error_msg)
             yield format_sse_message(json.dumps({"error": error_msg}))
-
 # Separate function for non-streaming API calls
 async def fetch_ollama_response(messages, model, tools=None):
     """Non-streaming API function for direct responses"""
