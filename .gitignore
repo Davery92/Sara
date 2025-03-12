@@ -13,3 +13,4 @@ data-dump/
 sara-desktop/node_modules
 __pycache__
 _pycache_
+**/__pycache__/
