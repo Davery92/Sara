@@ -54,6 +54,19 @@
             transform: translateX(-100%);
         }
 
+        .sidebar-header {
+            padding: 1.25rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .sidebar-header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
         .new-chat-btn {
             background-color: var(--accent-color);
             color: white;
@@ -73,6 +86,47 @@
 
         .new-chat-btn:hover {
             background-color: var(--accent-hover);
+        }
+
+        .nav-menu {
+            padding: 1rem 0;
+            flex: 1;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            color: var(--text-color);
+            text-decoration: none;
+            transition: background-color 0.2s;
+            margin-bottom: 0.25rem;
+            border-left: 3px solid transparent;
+            cursor: pointer;
+        }
+
+        .nav-item:hover {
+            background-color: var(--hover-color);
+        }
+
+        .nav-item.active {
+            background-color: var(--card-bg);
+            border-left-color: var(--accent-color);
+        }
+
+        .nav-item-icon {
+            margin-right: 0.75rem;
+            width: 1.25rem;
+            height: 1.25rem;
+        }
+
+        .section-title {
+            color: var(--muted-color);
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.75rem 1rem 0.25rem;
         }
 
         .conversation-list {
@@ -515,6 +569,10 @@
 <body>
     <!-- Sidebar -->
     <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h1>Sara Assistant</h1>
+        </div>
+        
         <button class="new-chat-btn" id="new-chat-btn">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -523,8 +581,29 @@
             New Chat
         </button>
 
+        <div class="nav-menu">
+            <div class="section-title">Navigation</div>
+            <a href="/chat" class="nav-item active">
+                <svg class="nav-item-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                    <circle cx="9" cy="10" r="1"></circle>
+                    <circle cx="15" cy="10" r="1"></circle>
+                </svg>
+                Chat
+            </a>
+            <a href="/dashboard" class="nav-item">
+                <svg class="nav-item-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="7" height="7"></rect>
+                    <rect x="14" y="3" width="7" height="7"></rect>
+                    <rect x="14" y="14" width="7" height="7"></rect>
+                    <rect x="3" y="14" width="7" height="7"></rect>
+                </svg>
+                Dashboard
+            </a>
+            <div class="section-title">Recent Conversations</div>
+        </div>
+
         <div class="conversation-list" id="conversation-list">
-            <!-- Simplified - we only show one conversation -->
             <div class="conversation-item active" data-id="current_session">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="conversation-item-icon">
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -605,8 +684,6 @@
     </div>
 
     <script>
-        // All the JavaScript code would go here
-        // (I've left it out for brevity, but it would be the same as the fixed JS code)
         document.addEventListener('DOMContentLoaded', function() {
             // DOM Elements
             const sidebar = document.getElementById('sidebar');
@@ -687,47 +764,59 @@
 
             // Function to initialize the chat interface
             function initializeChat() {
-                // Check if we already have messages in our chat history
-                if (chatHistory && chatHistory.length > 0) {
-                    // Show the chat container
+                // Check if we have messages in the DOM or chat history array
+                const existingMessages = document.querySelectorAll('.chat-message');
+                
+                if (existingMessages.length > 0 || (chatHistory && chatHistory.length > 0)) {
+                    // Show the chat container and hide empty state
                     emptyState.classList.add('hidden');
                     chatContainer.classList.remove('hidden');
                     
-                    // Render the messages
-                    renderMessages();
+                    // If we have chat history but no rendered messages, render them
+                    if (chatHistory.length > 0 && existingMessages.length === 0) {
+                        renderMessages();
+                    }
                 } else {
-                    // Try to fetch the current session
+                    // Try to fetch the current session from server
                     fetch('/v1/chat/current-session')
                         .then(response => {
-                            if (response.ok) {
-                                return response.json();
-                            } else {
-                                // If endpoint doesn't exist or fails, just use empty state
-                                throw new Error('No current session available');
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! status: ${response.status}`);
                             }
+                            return response.json();
                         })
                         .then(data => {
-                            if (data.messages && data.messages.length > 0) {
+                            if (data && data.messages && data.messages.length > 0) {
+                                // Store the messages in chat history
                                 chatHistory = data.messages;
+                                
+                                // Show chat container and hide empty state
                                 emptyState.classList.add('hidden');
                                 chatContainer.classList.remove('hidden');
+                                
+                                // Render the messages
                                 renderMessages();
+                                
+                                // Log success
+                                console.log(`Loaded ${chatHistory.length} messages from current session`);
                             } else {
-                                // Show empty state if no messages
+                                // If no messages, show empty state
+                                console.log('No messages found in current session');
                                 emptyState.classList.remove('hidden');
                                 chatContainer.classList.add('hidden');
                             }
                         })
                         .catch(error => {
-                            console.log('Starting with empty chat:', error.message);
-                            // Show empty state
+                            console.error('Error loading current session:', error);
+                            // Show empty state on error
                             emptyState.classList.remove('hidden');
                             chatContainer.classList.add('hidden');
                         });
                 }
             }
 
-            // Function to start a new chat
+
+            // Find the existing startNewChat function in the script
             function startNewChat() {
                 // Clear current messages
                 document.getElementById('messages-wrapper').innerHTML = '';
@@ -742,6 +831,33 @@
                 
                 // Focus the input
                 messageInput.focus();
+                
+                // Clear the input field if there's any text
+                messageInput.value = '';
+                messageInput.style.height = 'auto';
+                sendButton.disabled = true;
+                
+                // Make an API call to clear server-side history with our new endpoint
+                fetch('/v1/clear-conversation', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ conversation_id: 'current_session' })
+                })
+                .then(response => {
+                    if (response.ok) {
+                        console.log('Server-side history cleared successfully');
+                    } else {
+                        console.warn('Failed to clear server-side history:', response.statusText);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error clearing server-side history:', error);
+                    // The UI is still cleared even if server request fails
+                });
+                
+                console.log('Started new chat - history cleared');
             }
 
             // Function to fix scrolling issues
@@ -798,6 +914,7 @@
                     
                     // Only add user and assistant messages (skip system, tool, etc.)
                     if (msg.role === 'user' || msg.role === 'assistant') {
+                        // Add message but mark it as not new (isNew = false)
                         addMessageToChat(msg.role, msg.content, false);
                     }
                 });
@@ -812,7 +929,7 @@
                 console.log('Messages rendered successfully');
             }
 
-            // Send a message
+            // Updated sendMessage function to include proper history handling
             function sendMessage() {
                 const message = messageInput.value.trim();
                 if (!message || loadingResponse) return;
@@ -836,16 +953,20 @@
                 // Fix scrolling after adding user message
                 fixScrolling();
                 
-                // Prepare the request payload for the standard OpenAI-compatible endpoint
+                // Add to chat history array
+                chatHistory.push({ role: 'user', content: message });
+                
+                // Build complete history for context (important for conversation context)
+                const completeHistory = chatHistory.slice();
+                
+                // Prepare the request payload
                 const payload = {
                     model: "gpt-4o", // This will be mapped to your local model
-                    messages: [
-                        { role: "user", content: message }
-                    ],
+                    messages: completeHistory, // Send the entire conversation for context
                     stream: true
                 };
                 
-                // Create the EventSource for streaming
+                // Create the fetch request for streaming
                 fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: {

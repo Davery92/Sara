@@ -1,0 +1,13 @@
+{
+  "context_type": "fitness",
+  "data": {
+    "content": "Multiple fitness topics: The user is asking whether fasted morning training or after work full of food is better for strength training. (+ 2 more)",
+    "confidence_score": 0.95,
+    "last_updated": "2025-03-06",
+    "entries": [
+      "The user is asking whether fasted morning training or after work full of food is better for strength training.",
+      "The user is asking about the benefits of strength training either fasted in the morning or after eating a full meal.",
+      "The user is asking about the best time for strength training, either in a fasted state in the morning or after eating later in the day."
+    ]
+  }
+}

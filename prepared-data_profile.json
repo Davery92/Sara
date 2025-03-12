@@ -1,0 +1,160 @@
+{
+  "user_profile": {
+    "topics": [
+      {
+        "topic": "communication",
+        "count": 3
+      },
+      {
+        "topic": "appointment",
+        "count": 3
+      },
+      {
+        "topic": "reminder",
+        "count": 3
+      },
+      {
+        "topic": "time management",
+        "count": 3
+      },
+      {
+        "topic": "social interaction",
+        "count": 2
+      },
+      {
+        "topic": "help",
+        "count": 2
+      },
+      {
+        "topic": "reminders",
+        "count": 2
+      },
+      {
+        "topic": "updated information",
+        "count": 1
+      },
+      {
+        "topic": "note",
+        "count": 1
+      },
+      {
+        "topic": "continuity",
+        "count": 1
+      }
+    ],
+    "sentiment_distribution": {
+      "Neutral": {
+        "count": 6,
+        "percentage": 18.8
+      },
+      "Positive": {
+        "count": 8,
+        "percentage": 25.0
+      },
+      "positive, friendly": {
+        "count": 1,
+        "percentage": 3.1
+      },
+      "neutral": {
+        "count": 5,
+        "percentage": 15.6
+      },
+      "positive": {
+        "count": 11,
+        "percentage": 34.4
+      },
+      "positive, encouraging": {
+        "count": 1,
+        "percentage": 3.1
+      }
+    },
+    "activity_patterns": {
+      "by_hour": {
+        "11": 32
+      },
+      "by_weekday": {
+        "Tuesday": 32
+      }
+    },
+    "common_entities": [
+      {
+        "entity": "you",
+        "count": 6
+      },
+      {
+        "entity": "me",
+        "count": 2
+      },
+      {
+        "entity": "AI assistant",
+        "count": 2
+      },
+      {
+        "entity": "Odin",
+        "count": 2
+      },
+      {
+        "entity": "The Way of Kings",
+        "count": 1
+      },
+      {
+        "entity": "The Name of the Wind",
+        "count": 1
+      },
+      {
+        "entity": "Project Sara",
+        "count": 1
+      },
+      {
+        "entity": "AI project",
+        "count": 1
+      },
+      {
+        "entity": "dashboard",
+        "count": 1
+      },
+      {
+        "entity": "Neo4j",
+        "count": 1
+      },
+      {
+        "entity": "database",
+        "count": 1
+      },
+      {
+        "entity": "web search results",
+        "count": 1
+      },
+      {
+        "entity": "knowledge base",
+        "count": 1
+      },
+      {
+        "entity": "ntfy server",
+        "count": 1
+      },
+      {
+        "entity": "colleague",
+        "count": 1
+      }
+    ],
+    "writing_style": {
+      "average_word_length": 4.3,
+      "average_sentence_length": 9.0,
+      "total_messages": 32,
+      "total_words": 831,
+      "total_sentences": 93,
+      "questions_per_message": 0.91,
+      "exclamations_per_message": 0.53
+    },
+    "insights": [
+      "User frequently discusses topics related to: communication, appointment, reminder",
+      "User's messages are predominantly positive in tone",
+      "User is most active around 11:00",
+      "User asks a lot of questions relative to their message count"
+    ]
+  },
+  "timestamp": "2025-03-11T11:51:46.130712",
+  "message_count": 201,
+  "analysis_version": "1.0"
+}

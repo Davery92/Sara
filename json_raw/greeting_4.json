@@ -1,0 +1,8 @@
+{
+  "context_type": "greeting",
+  "data": {
+    "content": "The user greeted the assistant.",
+    "confidence_score": 0.9,
+    "last_updated": "2025-03-06"
+  }
+}

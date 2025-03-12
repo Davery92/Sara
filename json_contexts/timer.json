@@ -1,0 +1,12 @@
+{
+  "context_type": "timer",
+  "data": {
+    "content": "Multiple timer topics: The user requests setting a 10-minute timer and discusses potential activities to do during that time. (+ 1 more)",
+    "confidence_score": 0.97,
+    "last_updated": "2025-03-06",
+    "entries": [
+      "The user requests setting a 10-minute timer and discusses potential activities to do during that time.",
+      "The user requested to set a 5-minute timer."
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "context_type": "casual_chat",
+  "data": {
+    "content": "Multiple casual_chat topics: The user is open to chatting casually about general topics or anything in particular. (+ 3 more)",
+    "confidence_score": 0.95,
+    "last_updated": "2025-03-06",
+    "entries": [
+      "The user is open to chatting casually about general topics or anything in particular.",
+      "The user expresses enjoyment in casual, aimless conversation.",
+      "The user expresses interest in casual, aimless conversation.",
+      "The user is responding positively to a joke or statement made by the assistant and expresses interest in remembering it."
+    ]
+  }
+}

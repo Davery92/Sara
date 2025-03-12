@@ -1,0 +1,8 @@
+{
+  "context_type": "project_steps",
+  "data": {
+    "content": "The user is inquiring about the steps for a project named Project Sara, which involves creating a dashboard, building a database in Neo4j, adding web search results to the knowledge base, and integrating with an ntfy server.",
+    "confidence_score": 0.92,
+    "last_updated": "2025-03-06"
+  }
+}

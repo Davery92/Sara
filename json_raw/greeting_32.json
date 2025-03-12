@@ -1,0 +1,8 @@
+{
+  "context_type": "greeting",
+  "data": {
+    "content": "The user initiated a conversation with a greeting, and the assistant responded by offering help on an unspecified issue or topic.",
+    "confidence_score": 0.92,
+    "last_updated": "2025-03-06"
+  }
+}

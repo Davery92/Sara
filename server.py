@@ -37,6 +37,7 @@ from modules.neo4j_integration import get_message_store, integrate_neo4j_with_se
 from fastapi.responses import FileResponse, PlainTextResponse
 import psutil
 from modules.neo4j_connection import check_neo4j_connection
+import tiktoken
 
 
 # Initialize the message store with Neo4j backend
@@ -67,11 +68,11 @@ app.add_middleware(
 NOTES_DIRECTORY = "/home/david/Sara/notes"
 
 MESSAGE_HISTORY = []
-MAX_HISTORY = 15  # Maximum number of messages (excluding system prompt)
+MAX_HISTORY = 60  # Maximum number of messages (excluding system prompt)
 
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
-
+SKIP_TOOL_FOLLOWUP = True
 
 # Initialize Perplexica client
 perplexica = PerplexicaClient(base_url="http://localhost:3001")
@@ -345,7 +346,66 @@ def ping(self):
         logger.error(f"Redis ping failed: {e}")
         return False
 
+def count_tokens(text, model="cl100k_base"):
+    """Count the number of tokens in a text string."""
+    try:
+        encoder = tiktoken.get_encoding(model)
+        return len(encoder.encode(text))
+    except Exception as e:
+        logger.error(f"Error counting tokens: {str(e)}")
+        # Fallback simple estimate: ~4 chars per token on average
+        return len(text) // 4
 
+def save_conversation_history():
+    """Save the current conversation history to Redis for persistence"""
+    try:
+        # Convert the conversation history to JSON
+        history_json = json.dumps(MESSAGE_HISTORY)
+        
+        # Store in Redis - Fix: use client.redis_client
+        message_store.client.redis_client.set("conversation_history", history_json)
+        
+        logger.info(f"Saved conversation history ({len(MESSAGE_HISTORY)} messages) to Redis")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving conversation history: {str(e)}")
+        return False
+    
+def load_conversation_history():
+    """Load the conversation history from Redis"""
+    global MESSAGE_HISTORY
+    
+    try:
+        # Get the saved history from Redis
+        history_json = message_store.client.redis_client.get("conversation_history")
+        
+        if history_json:
+            if isinstance(history_json, bytes):
+                history_json = history_json.decode('utf-8')
+                
+            # Parse the JSON
+            loaded_history = json.loads(history_json)
+            
+            # Validate each message has required fields
+            valid_history = []
+            for msg in loaded_history:
+                if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                    # Add token count if missing
+                    if 'tokens' not in msg:
+                        msg['tokens'] = count_tokens(msg['content'])
+                    valid_history.append(msg)
+            
+            # Update the MESSAGE_HISTORY
+            MESSAGE_HISTORY = valid_history
+            
+            logger.info(f"Loaded conversation history from Redis ({len(MESSAGE_HISTORY)} messages)")
+            return True
+    except Exception as e:
+        logger.error(f"Error loading conversation history: {str(e)}")
+    
+    # If we reach here, we either had an error or no history was found
+    MESSAGE_HISTORY = []
+    return False
 
 @app.on_event("startup")
 async def startup_event():
@@ -380,7 +440,11 @@ async def startup_event():
     TOOL_SYSTEM_PROMPT_TEMPLATE = load_tool_system_prompt()
     logger.info("Tool system prompt template loaded")
     
+    load_conversation_history()
+    logger.info("Conversation history loaded")
     
+    asyncio.create_task(periodic_save_history())
+    logger.info("Started periodic conversation history saving")
     
     # Check Redis connection
     if message_store.ping():
@@ -406,6 +470,14 @@ async def startup_event():
     # Check Neo4j connection
     neo4j_status = check_neo4j_connection()
     logger.info(f"Neo4j connection status: {neo4j_status}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Save conversation history when shutting down"""
+    logger.info("Server shutting down, saving conversation history...")
+    save_conversation_history()
+    logger.info("Shutdown complete")
+
 
 @app.get("/v1/conversations")
 async def list_conversations(limit: int = 20, offset: int = 0):
@@ -569,10 +641,11 @@ def add_message_to_history(role, content):
 
 def get_messages_with_system_prompt():
     """
-    Get the full message list with system prompt for the model
+    Get the full message list with system prompt for the model, with token counts
     
     Returns:
         list: Complete message list for sending to model
+        dict: Token statistics
     """
     global MESSAGE_HISTORY
     
@@ -580,12 +653,61 @@ def get_messages_with_system_prompt():
     current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # Create system message with current date
-    system_message = {'role': 'system', 'content': f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}"}
+    system_prompt = f"{SYSTEM_PROMPT}\n\nCurrent date and time: {current_datetime}"
+    system_tokens = count_tokens(system_prompt)
+    
+    # Create system message
+    system_message = {
+        'role': 'system', 
+        'content': system_prompt,
+        'tokens': system_tokens
+    }
     
     # Combine system message with conversation history
     messages = [system_message] + MESSAGE_HISTORY
     
-    return messages
+    # Calculate token statistics
+    history_tokens = sum(msg.get('tokens', 0) for msg in MESSAGE_HISTORY)
+    total_tokens = system_tokens + history_tokens
+    
+    token_stats = {
+        'system_tokens': system_tokens,
+        'history_tokens': history_tokens,
+        'total_tokens': total_tokens
+    }
+    
+    # Log token usage
+    logger.info(f"Token usage - System: {system_tokens}, History: {history_tokens}, Total: {total_tokens}")
+    
+    # Store token stats in Redis for dashboard
+    try:
+        token_stats_json = json.dumps(token_stats)
+        
+        # Use a more careful approach to avoid attribute errors
+        try:
+            # Try different possible Redis client locations
+            if hasattr(message_store, 'client') and hasattr(message_store.client, 'redis_client'):
+                message_store.client.redis_client.set("token_stats", token_stats_json)
+            elif hasattr(message_store, 'message_store'):
+                message_store.message_store.set("token_stats", token_stats_json)
+            elif hasattr(message_store, 'redis_client'):
+                message_store.redis_client.set("token_stats", token_stats_json)
+            else:
+                # Skip Redis storage with a warning
+                logger.warning("Couldn't find appropriate Redis client attribute in message_store")
+        except Exception as e:
+            logger.warning(f"Failed to store token stats in Redis: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error preparing token stats for Redis: {str(e)}")
+    
+    # Return the messages without token counts for the model
+    clean_messages = []
+    for msg in messages:
+        clean_msg = {'role': msg['role'], 'content': msg['content']}
+        clean_messages.append(clean_msg)
+    
+    return clean_messages, token_stats
+
 
 def clear_conversation_history():
     """Reset the conversation history"""
@@ -631,6 +753,18 @@ def get_recent_conversations(days=7, limit=5):
         })
     
     return summaries
+
+async def periodic_save_history():
+    """Periodically save conversation history to ensure it's not lost"""
+    while True:
+        try:
+            # Wait for 5 minutes
+            await asyncio.sleep(300)
+            
+            # Save the conversation history
+            save_conversation_history()
+        except Exception as e:
+            logger.error(f"Error in periodic history save: {str(e)}")
 
 def update_user_profile(user_id, conversation_id):
     """Update user profile based on conversation"""
@@ -910,116 +1044,6 @@ class ConversationBuffer:
 # Initialize the conversation buffer
 conversation_buffer = ConversationBuffer(max_buffer_size=10)
 
-async def summarize_buffer_and_update_profile(conversation_id):
-    """
-    Summarize the conversation buffer and update the user profile
-    This function should be called as a background task
-    """
-    # Skip if summarization is already in progress for this conversation
-    if conversation_buffer.is_summarization_in_progress(conversation_id):
-        logger.info(f"Summarization already in progress for conversation {conversation_id}")
-        return
-    
-    # Mark summarization as started
-    conversation_buffer.mark_summarization_started(conversation_id)
-    
-    try:
-        # Get messages from buffer
-        buffer_messages = conversation_buffer.get_messages(conversation_id)
-        
-        if not buffer_messages or len(buffer_messages) < 3:  # Minimum threshold for summarization
-            logger.info(f"Not enough messages in buffer for summarization: {len(buffer_messages)}")
-            conversation_buffer.mark_summarization_completed(conversation_id)
-            return
-        
-        logger.info(f"Summarizing buffer with {len(buffer_messages)} messages for conversation {conversation_id}")
-        
-        # Format conversation for the model
-        formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in buffer_messages])
-        
-        # Create a prompt specific to user profile extraction
-        extract_prompt = """
-        Based on this conversation segment, extract key information about the user such as:
-        1. Preferences and interests
-        2. Personal details they've shared
-        3. Opinions or values they've expressed
-        4. Any other relevant information for building a user profile
-        
-        Provide this information in a structured list format that could be added to a user profile.
-        Focus only on new information, not what was already known.
-        """
-        
-        # Make model request for extraction
-        extract_messages = [
-            {'role': 'system', 'content': extract_prompt},
-            {'role': 'user', 'content': formatted_convo}
-        ]
-        
-        # Get extraction using non-streaming request
-        response = await fetch_ollama_response(extract_messages, "command-r7b", stream=False)
-        
-        if 'message' in response and 'content' in response['message']:
-            new_info = response['message']['content']
-            
-            # Check if new information was extracted
-            if "no new information" in new_info.lower() or "not enough information" in new_info.lower():
-                logger.info(f"No new user information extracted from conversation {conversation_id}")
-            else:
-                # Update the single user profile in the notes directory
-                profile_id = "user_profile"
-                existing_profile = read_note(profile_id)
-                
-                if "error" in existing_profile:
-                    # Create new profile if it doesn't exist
-                    logger.info("Creating new user profile")
-                    create_note(
-                        title="User Profile",
-                        content=f"# User Profile\nCreated: {datetime.now().strftime('%Y-%m-%d')}\n\n{new_info}",
-                        tags=["user_profile"]
-                    )
-                else:
-                    # Append to existing profile
-                    logger.info("Updating user profile")
-                    append_note(
-                        profile_id,
-                        f"\n\n## Updated {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{new_info}"
-                    )
-                
-                logger.info("User profile updated with new information")
-        
-        # Also generate a summary of this conversation segment
-        summary_prompt = "Summarize the key points of this conversation segment in 2-3 sentences."
-        summary_messages = [
-            {'role': 'system', 'content': summary_prompt},
-            {'role': 'user', 'content': formatted_convo}
-        ]
-        
-        summary_response = await fetch_ollama_response(summary_messages, "llama3.1", stream=False)
-        
-        if 'message' in summary_response and 'content' in summary_response['message']:
-            summary = summary_response['message']['content']
-            
-            # Store this summary with a special tag
-            today = datetime.now()
-            summary_id = f"summary-segment-{conversation_id}-{today.strftime('%Y%m%d%H%M%S')}"
-            
-            message_store.store_message(
-                role='system',
-                content=summary,
-                conversation_id=summary_id,
-                date=today,
-                embedding=text_to_embedding_ollama(summary)['embeddings']
-            )
-            
-            logger.info(f"Stored segment summary: {summary_id}")
-    except Exception as e:
-        logger.error(f"Error in summarization process: {str(e)}")
-        logger.exception(e)
-    finally:
-        # Clear the buffer and mark summarization as completed
-        conversation_buffer.clear_buffer(conversation_id)
-        conversation_buffer.mark_summarization_completed(conversation_id)
-
 
 
 async def maybe_summarize_conversation(conversation_id):
@@ -1029,77 +1053,7 @@ async def maybe_summarize_conversation(conversation_id):
         return await summarize_conversation(conversation_id)
     return None
 
-def add_message_to_conversation(conversation_id, role, content):
-    """
-    Add a message to conversation history, maintaining 10-message limit.
-    Only user and assistant messages are stored, not tool calls.
-    The oldest message is removed when the limit is reached.
-    """
-    try:
-        # Get current conversation messages
-        current_messages = message_store.get_messages_by_conversation(conversation_id)
-        
-        # Skip if it's a tool message
-        if role == 'tool':
-            logger.info(f"Skipping storage of tool message in conversation {conversation_id}")
-            return None
-        
-        # Ensure content is a string
-        if not isinstance(content, str):
-            try:
-                content = str(content)
-            except Exception as e:
-                logger.error(f"Failed to convert content to string: {str(e)}")
-                content = "Error: Could not convert content to string"
-        
-        today = datetime.now()
-        
-        # Generate embedding for the message
-        embedding = text_to_embedding_ollama(content)['embeddings']
-        
-        # Store the new message
-        logger.info(f"Adding {role} message to conversation {conversation_id}")
-        message_id = message_store.store_message(
-            role=role,
-            content=content,
-            conversation_id=conversation_id,
-            date=today,
-            embedding=embedding
-        )
-        
-        # Add to conversation buffer for background processing
-        conversation_buffer.add_message(
-            conversation_id=conversation_id,
-            message={
-                'role': role,
-                'content': content,
-                'timestamp': today.timestamp()
-            }
-        )
-        
-        # If we now have more than 10 messages, remove the oldest one
-        if len(current_messages) >= 15:
-            logger.info(f"Conversation {conversation_id} has reached the 10-message limit, removing oldest")
-            
-            # Sort messages by timestamp
-            sorted_messages = sorted(current_messages, key=lambda x: x.get('timestamp', 0))
-            
-            # Get the oldest message
-            oldest_message = sorted_messages[0]
-            
-            # Delete the oldest message
-            try:
-                # Construct the message key format based on your Redis implementation
-                oldest_key = f"message:{conversation_id}:{oldest_message['role']}:{oldest_message['timestamp']}"
-                message_store.message_store.delete(oldest_key)
-                logger.info(f"Deleted oldest message with key {oldest_key}")
-            except Exception as e:
-                logger.error(f"Error deleting oldest message: {str(e)}")
-        
-        return message_id
-    except Exception as e:
-        logger.error(f"Error in add_message_to_conversation: {str(e)}")
-        return None
+
 
 def list_notes() -> List[Dict[str, Any]]:
     """List all available notes with metadata"""
@@ -1696,8 +1650,7 @@ def get_message_by_key(self, key):
             return None
     except Exception as e:
         logger.warning(f"Error retrieving message {key}: {e}")
-        return None
-
+        return 
 
 
 # File operations
@@ -1821,7 +1774,7 @@ async def process_tool_calls(response_data: dict) -> dict:
     return tool_outputs
 
 # API request processing
-async def send_to_ollama_api(messages, model, tools=None, stream=True):
+async def send_to_ollama_api(messages, model, tools=None, stream=True, user_query=None, is_follow_up=False):
     """Streaming API function - use only for streaming responses"""
     async with aiohttp.ClientSession() as session:
         # Map OpenAI model to local model
@@ -1854,7 +1807,7 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
         # Get the appropriate URL based on the model
         url = MODEL_URLS.get(local_model, MODEL_URLS["default"])
         
-        logger.info(f"Sending streaming request to Ollama at {url} with model {local_model}")
+        logger.info(f"Sending {'follow-up' if is_follow_up else 'initial'} streaming request to Ollama at {url} with model {local_model}")
         logger.debug(f"Request data: {json.dumps(data)}")
         
         try:
@@ -1874,84 +1827,77 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                         response_data = json.loads(chunk_str)
                         logger.debug(f"Received chunk: {chunk_str}")
                         
-                                                        # Handle different types of responses
+                        # If this is already a follow-up response, just yield it without further processing
+                        if is_follow_up:
+                            yield format_sse_message(chunk_str)
+                            continue
+                        
+                        # Handle different types of responses
                         # Case 1: Tool calls in the response
                         if 'message' in response_data and 'tool_calls' in response_data['message']:
                             logger.info(f"Tool call detected in response")
+                            
+                            # Don't yield the tool call message directly
+                            # Instead, process it and make a follow-up request with the results
+                            
                             tool_outputs = await process_tool_calls(response_data)
                             
                             if tool_outputs:
                                 logger.info(f"Processed tool outputs: {tool_outputs}")
                                 
-                                # Find the last user message
-                                last_user_message = None
-                                for i in range(len(messages) - 1, -1, -1):
-                                    if messages[i]['role'] == 'user':
-                                        last_user_message = messages[i]
-                                        break
-                                
-                                if not last_user_message:
-                                    logger.warning("No user message found in history to use for follow-up")
-                                    # Use a default message if none found
-                                    last_user_message = {'role': 'user', 'content': 'Please continue based on the tool results.'}
-                                
-                                # Create a new messages array for follow-up
-                                follow_up_messages = []
-                                
-                                # Check if any of the tool calls was 'send_message'
-                                send_message_tool_used = False
-                                for tool_output in tool_outputs:
-                                    if tool_output.get('name') == 'send_message':
-                                        send_message_tool_used = True
-                                        break
-                                
-                                # If send_message tool was used, use the original messages up to the user message
-                                if send_message_tool_used:
-                                    logger.info("send_message tool detected - using original user message for follow-up")
-                                    
-                                    # Add all messages up to and including the last user message
-                                    user_message_found = False
-                                    for msg in messages:
-                                        follow_up_messages.append(msg)
-                                        
-                                        # If we've just added the last user message, stop here
-                                        if msg['role'] == 'user' and msg == last_user_message:
-                                            user_message_found = True
+                                # Get the most recent user query if it wasn't passed explicitly
+                                original_query = user_query
+                                if not original_query:
+                                    # Reverse the messages list to find the most recent user message
+                                    for msg in reversed(messages):
+                                        if msg.get('role') == 'user':
+                                            original_query = msg.get('content', '')
+                                            logger.info(original_query)
                                             break
+                                
+                                # Format tool results for the system prompt
+                                tool_results = ""
+                                for output in tool_outputs:
+                                    if output.get('role') == 'tool' and 'content' in output:
+                                        tool_name = output.get('tool_call_id', 'unknown_tool')
+                                        tool_results += f"Tool: {tool_name}\n"
+                                        tool_results += f"Result: {output['content']}\n\n"
+                                
+                                # Read the tool system prompt template
+                                try:
+                                    with open('tool_system_prompt.txt', 'r') as f:
+                                        system_prompt_template = f.read()
                                     
-                                    # Fallback if user message not found
-                                    if not user_message_found:
-                                        follow_up_messages = messages.copy()
-                                else:
-                                    # For other tools, add all original messages plus tool outputs
-                                    follow_up_messages = messages.copy()
-                                    # Add tool outputs to conversation history if not using send_message
-                                    for tool_output in tool_outputs:
-                                        follow_up_messages.append(tool_output)
+                                    # Replace placeholders in the template
+                                    system_prompt = system_prompt_template.replace("{{user_query}}", original_query)
+                                    system_prompt = system_prompt.replace("{{tool_results}}", tool_results)
+                                    
+                                except Exception as e:
+                                    logger.error(f"Error reading tool system prompt: {str(e)}")
+                                    system_prompt = f"Continue based on the tool results for query: {original_query}\nTool results: {tool_results}\nDo not repeat the initial response."
                                 
-                                # Send a follow-up request
-                                follow_up_data = {
-                                    'model': local_model,
-                                    'messages': follow_up_messages,
-                                    'stream': True
-                                }
+                                # Create follow-up messages with the proper system prompt
+                                follow_up_messages = [
+                                    {'role': 'system', 'content': system_prompt}
+                                ]
                                 
-                                logger.info(f"Sending follow-up request after tool calls")
-                                async with session.post(url, json=follow_up_data) as follow_up_response:
-                                    follow_up_response.raise_for_status()
-                                    async for follow_up_chunk in follow_up_response.content:
-                                        if not follow_up_chunk:
-                                            continue
-                                        
-                                        follow_up_str = follow_up_chunk.decode('utf-8').strip()
-                                        if follow_up_str:
-                                            yield format_sse_message(follow_up_str)
+                                # Send a follow-up request with the tool context, passing is_follow_up=True
+                                # This will prevent recursive follow-up requests
+                                async for follow_up_chunk in send_to_ollama_api(
+                                    follow_up_messages, 
+                                    model, 
+                                    tools=None, 
+                                    stream=True, 
+                                    user_query=original_query,
+                                    is_follow_up=True  # Mark this as a follow-up request
+                                ):
+                                    yield follow_up_chunk
                             else:
-                                # No tool outputs, just yield the chunk
+                                # No tool outputs, so just yield the original response
                                 yield format_sse_message(chunk_str)
                         
-                        # Case 2: Direct text response (non-tool response)
-                        elif 'message' in response_data and 'content' in response_data['message']:
+                        # Case 2: Regular responses (non-tool responses)
+                        else:
                             logger.info("Regular message response detected - sending follow-up request for consistency")
                             
                             # Use the same approach as with tool calls for consistency:
@@ -1971,11 +1917,6 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
                                     follow_up_str = follow_up_chunk.decode('utf-8').strip()
                                     if follow_up_str:
                                         yield format_sse_message(follow_up_str)
-                        
-                        # Case 3: Other response formats (including 'done' messages)
-                        else:
-                            # For other response formats, just yield the chunk
-                            yield format_sse_message(chunk_str)
                             
                     except json.JSONDecodeError:
                         logger.warning(f"JSON decode error for chunk: {chunk_str}")
@@ -1985,7 +1926,6 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True):
             error_msg = f"An error occurred: {str(e)}"
             logger.error(error_msg)
             yield format_sse_message(json.dumps({"error": error_msg}))
-
 # Separate function for non-streaming API calls
 async def fetch_ollama_response(messages, model, tools=None):
     """Non-streaming API function for direct responses"""
@@ -2029,7 +1969,7 @@ async def fetch_ollama_response(messages, model, tools=None):
             raise HTTPException(status_code=500, detail=error_msg)
 
 # Define a new function to manage the conversation window
-def manage_conversation_window(conversation_id, max_history=15):
+def manage_conversation_window(conversation_id, max_history=60):
     """
     Retrieve the last N messages from a conversation to use as context.
     If there are more than max_history messages, oldest messages will be excluded.
@@ -2056,64 +1996,31 @@ def manage_conversation_window(conversation_id, max_history=15):
         logger.error(f"Error retrieving conversation window: {str(e)}")
         return []
 
-# Format chunk as SSE message (Server-Sent Events)
 def format_sse_message(data):
-    # Convert Ollama format to OpenAI format for streaming
+    """Format a response as a Server-Sent Event message"""
     try:
-        ollama_data = json.loads(data)
+        # If it's already a string, try to parse it as JSON
+        if isinstance(data, str):
+            try:
+                data_obj = json.loads(data)
+            except json.JSONDecodeError:
+                # If it's not valid JSON, just wrap it in an SSE format
+                return f"data: {data}\n\n"
+        else:
+            data_obj = data
         
-        # Extract the content from Ollama response
-        if 'message' in ollama_data and 'content' in ollama_data['message']:
-            content = ollama_data['message']['content']
-            
-            # Create OpenAI-compatible delta structure
-            openai_chunk = {
-                "id": f"chatcmpl-{uuid4()}",
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": ollama_data.get('model', 'unknown'),
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "content": content
-                        },
-                        "finish_reason": None
-                    }
-                ]
-            }
-            
-            return f"data: {json.dumps(openai_chunk)}\n\n"
+        # Generate a unique ID for each message
+        message_id = f"chatcmpl-{uuid4()}"
+        current_time = int(datetime.now().timestamp())
         
-        # Handle tool calls if present
-        elif 'message' in ollama_data and 'tool_calls' in ollama_data['message']:
-            tool_calls = ollama_data['message']['tool_calls']
-            
-            openai_chunk = {
-                "id": f"chatcmpl-{uuid4()}",
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": ollama_data.get('model', 'unknown'),
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": tool_calls
-                        },
-                        "finish_reason": None
-                    }
-                ]
-            }
-            
-            return f"data: {json.dumps(openai_chunk)}\n\n"
-            
-        # For the final chunk
-        elif ollama_data.get('done', False):
+        # Special handling for "done" messages
+        if isinstance(data_obj, dict) and data_obj.get('done', False):
+            # First send the final chunk
             done_chunk = {
-                "id": f"chatcmpl-{uuid4()}",
+                "id": message_id,
                 "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": ollama_data.get('model', 'unknown'),
+                "created": current_time,
+                "model": data_obj.get('model', 'unknown'),
                 "choices": [
                     {
                         "index": 0,
@@ -2124,13 +2031,112 @@ def format_sse_message(data):
             }
             return f"data: {json.dumps(done_chunk)}\n\ndata: [DONE]\n\n"
         
-        # For other cases, pass through as is
-        return f"data: {data}\n\n"
+        # Handle error messages
+        if isinstance(data_obj, dict) and 'error' in data_obj:
+            error_chunk = {
+                "id": message_id,
+                "object": "chat.completion.chunk",
+                "created": current_time,
+                "model": data_obj.get('model', 'unknown'),
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": data_obj['error']
+                        },
+                        "finish_reason": "error"
+                    }
+                ]
+            }
+            return f"data: {json.dumps(error_chunk)}\n\n"
         
-    except json.JSONDecodeError:
-        # If it's not valid JSON, just wrap it in an SSE format
-        return f"data: {data}\n\n"
-
+        # Handle message content
+        if isinstance(data_obj, dict) and 'message' in data_obj:
+            message = data_obj['message']
+            
+            # Handle content
+            if 'content' in message:
+                # Make sure content is a string
+                content = str(message['content'])
+                
+                openai_chunk = {
+                    "id": message_id,
+                    "object": "chat.completion.chunk",
+                    "created": current_time,
+                    "model": data_obj.get('model', 'unknown'),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": content
+                            },
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                return f"data: {json.dumps(openai_chunk)}\n\n"
+                
+            # Handle tool calls
+            elif 'tool_calls' in message:
+                openai_chunk = {
+                    "id": message_id,
+                    "object": "chat.completion.chunk",
+                    "created": current_time,
+                    "model": data_obj.get('model', 'unknown'),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": message['tool_calls']
+                            },
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                return f"data: {json.dumps(openai_chunk)}\n\n"
+        
+        # Handle cases where we have a complete OpenAI-style chunk already
+        if (isinstance(data_obj, dict) and 
+            data_obj.get('object') == 'chat.completion.chunk' and
+            'choices' in data_obj):
+            # It's already formatted correctly, just wrap in SSE
+            return f"data: {json.dumps(data_obj)}\n\n"
+        
+        # Default case - just wrap in SSE format with basic structure
+        default_chunk = {
+            "id": message_id,
+            "object": "chat.completion.chunk",
+            "created": current_time,
+            "model": data_obj.get('model', 'unknown') if isinstance(data_obj, dict) else 'unknown',
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": str(data_obj) if not isinstance(data_obj, dict) else json.dumps(data_obj)
+                    },
+                    "finish_reason": None
+                }
+            ]
+        }
+        return f"data: {json.dumps(default_chunk)}\n\n"
+    except Exception as e:
+        # If any error occurs, format a basic error message
+        error_chunk = {
+            "id": f"chatcmpl-{uuid4()}",
+            "object": "chat.completion.chunk",
+            "created": int(datetime.now().timestamp()),
+            "model": "unknown",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": f"Error formatting message: {str(e)}"
+                    },
+                    "finish_reason": "error"
+                }
+            ]
+        }
+        return f"data: {json.dumps(error_chunk)}\n\n"
 # Pydantic models for OpenAI API
 class Message(BaseModel):
     role: str
@@ -2204,13 +2210,12 @@ async def chat_completions(request: ChatCompletionRequest):
     # Add user message to history
     add_message_to_history('user', latest_user_message['content'])
     
-    # Get messages for model
-    messages = get_messages_with_system_prompt()
+    # Get messages for model - using the fixed version that properly handles token stats
+    messages, token_stats = get_messages_with_system_prompt()
     
     logger.info(f"Sending {len(messages)} messages to model")
     
-    # Still store in Redis for vector search functionality
-    # This doesn't affect the conversation history logic
+    # Store in Redis for vector search functionality
     if message_store:
         try:
             embed_and_save(latest_user_message['content'], "primary_conversation", "user")
@@ -2221,6 +2226,7 @@ async def chat_completions(request: ChatCompletionRequest):
     if stream:
         async def stream_response():
             full_response = ""
+            # Use the existing send_to_ollama_api function which was working correctly
             async for chunk in send_to_ollama_api(messages, model, tools, stream=True):
                 yield chunk
                 
@@ -2232,13 +2238,15 @@ async def chat_completions(request: ChatCompletionRequest):
                         if 'content' in delta and delta['content']:
                             full_response += delta['content']
                 except Exception as e:
+                    # Just log the error and continue
+                    logger.debug(f"Error extracting content from chunk: {str(e)}")
                     pass
             
             # Add assistant response to history
             if full_response:
                 add_message_to_history('assistant', full_response)
                 
-                # Optionally also store in Redis for vector search
+                # Also store in Redis for vector search
                 if message_store:
                     try:
                         embed_and_save(full_response, "primary_conversation", "assistant")
@@ -2259,7 +2267,7 @@ async def chat_completions(request: ChatCompletionRequest):
                 assistant_content = response['message']['content']
                 add_message_to_history('assistant', assistant_content)
                 
-                # Optionally store in Redis for vector search
+                # Store in Redis for vector search
                 if message_store:
                     embed_and_save(assistant_content, "primary_conversation", "assistant")
             
@@ -2280,9 +2288,9 @@ async def chat_completions(request: ChatCompletionRequest):
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": len(str(messages)),
-                    "completion_tokens": len(assistant_content),
-                    "total_tokens": len(str(messages)) + len(assistant_content)
+                    "prompt_tokens": token_stats.get('total_tokens', 0),
+                    "completion_tokens": len(assistant_content) // 4,  # Rough estimate
+                    "total_tokens": token_stats.get('total_tokens', 0) + len(assistant_content) // 4
                 }
             }
             
@@ -2291,7 +2299,6 @@ async def chat_completions(request: ChatCompletionRequest):
         except Exception as e:
             logger.error(f"Error in completion: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error in completion: {str(e)}")
-
 
 @app.post("/v1/embeddings")
 async def create_embeddings(request: EmbeddingRequest):
@@ -2934,7 +2941,44 @@ async def get_gpu_usage():
             "utilization": 30,  # Default value
             "error": str(e)
         }
-    
+
+@app.post("/v1/clear-conversation")
+async def clear_conversation(request: dict = Body(...)):
+    """Clear the conversation history for a specific conversation ID"""
+    try:
+        conversation_id = request.get("conversation_id", "current_session")
+        logger.info(f"Clearing conversation history for conversation_id: {conversation_id}")
+        
+        # Use the existing clear_conversation_history function if clearing the in-memory history
+        if conversation_id == "current_session" or conversation_id == "primary_conversation":
+            clear_conversation_history()
+            logger.info("In-memory conversation history cleared")
+        
+        # If using Redis/message store, attempt to delete messages for the conversation
+        if message_store:
+            try:
+                # This will use the delete_conversation method if implemented
+                if hasattr(message_store, 'delete_conversation') and callable(getattr(message_store, 'delete_conversation')):
+                    success = message_store.delete_conversation(conversation_id)
+                    logger.info(f"Deleted conversation {conversation_id} from message store: {success}")
+                # Alternative approach using direct Redis commands if available
+                elif hasattr(message_store, 'message_store') and hasattr(message_store.message_store, 'keys'):
+                    # Get all keys for this conversation
+                    pattern = f"message:{conversation_id}:*"
+                    keys = message_store.message_store.keys(pattern)
+                    if keys:
+                        # Delete all keys
+                        message_store.message_store.delete(*keys)
+                        logger.info(f"Deleted {len(keys)} messages for conversation {conversation_id}")
+            except Exception as e:
+                logger.error(f"Error deleting conversation from message store: {str(e)}")
+                # We continue even if there's an error with the message store
+        
+        return {"status": "success", "message": f"Conversation {conversation_id} cleared"}
+    except Exception as e:
+        logger.error(f"Error clearing conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error clearing conversation: {str(e)}")
+
 @app.get("/v1/neo4j/check-direct")
 async def check_neo4j_direct():
     """Direct endpoint to check Neo4j connection"""
@@ -2958,6 +3002,51 @@ async def check_neo4j_direct():
     except Exception as e:
         logger.error(f"Error in direct Neo4j check: {e}")
         return {"status": "Error"}
+
+@app.get("/v1/stats/tokens")
+async def get_token_stats():
+    """Get current token statistics for the dashboard"""
+    try:
+        # Try to get the stats from Redis
+        token_stats_json = None
+        if hasattr(message_store, 'client') and hasattr(message_store.client, 'redis_client'):
+            token_stats_json = message_store.client.redis_client.get("token_stats")
+        elif hasattr(message_store, 'message_store'):
+            token_stats_json = message_store.message_store.get("token_stats")
+        elif hasattr(message_store, 'redis_client'):
+            token_stats_json = message_store.redis_client.get("token_stats")
+        
+        if token_stats_json:
+            if isinstance(token_stats_json, bytes):
+                token_stats_json = token_stats_json.decode('utf-8')
+                
+            # Parse the JSON
+            token_stats = json.loads(token_stats_json)
+        else:
+            # Calculate current stats if not in Redis
+            _, token_stats = get_messages_with_system_prompt()
+        
+        # Ensure the response has all the expected fields
+        response = {
+            'total_tokens': token_stats.get('total_tokens', 0),
+            'system_tokens': token_stats.get('system_tokens', 0),
+            'history_tokens': token_stats.get('history_tokens', 0),
+            'token_limit': 100000,  # Default limit
+            'remaining_tokens': 100000 - token_stats.get('total_tokens', 0)
+        }
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error retrieving token stats: {str(e)}")
+        # Return default stats if there's an error
+        return {
+            'total_tokens': 0,
+            'system_tokens': 0,
+            'history_tokens': 0,
+            'token_limit': 100000,
+            'remaining_tokens': 100000
+        }
+
 
 @app.get("/health", status_code=200)
 async def health_check():

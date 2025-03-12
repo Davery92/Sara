@@ -1,0 +1,35 @@
+{
+    "name": "sara-desktop",
+    "version": "1.0.0",
+    "description": "Sara AI Assistant Desktop App",
+    "main": "main.js",
+    "scripts": {
+      "start": "electron .",
+      "build": "electron-builder",
+      "build:win": "electron-builder --win",
+      "postinstall": "electron-builder install-app-deps"
+    },
+    "author": "David",
+    "license": "MIT",
+    "devDependencies": {
+      "electron": "^27.0.0",
+      "electron-builder": "^24.6.4"
+    },
+    "dependencies": {
+      "electron-store": "^8.1.0",
+      "marked": "^9.1.5"
+    },
+    "build": {
+      "appId": "com.yourname.sara-desktop",
+      "productName": "Sara Assistant",
+      "mac": {
+        "category": "public.app-category.productivity"
+      },
+      "win": {
+        "target": "nsis"
+      },
+      "linux": {
+        "target": "AppImage"
+      }
+    }
+  }

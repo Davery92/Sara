@@ -1,0 +1,12 @@
+{
+  "context_type": "general_chat",
+  "data": {
+    "content": "Multiple general_chat topics: The user initiates a casual conversation without specific topics, expressing openness to discuss various aspects of their day or any other interests. (+ 1 more)",
+    "confidence_score": 0.95,
+    "last_updated": "2025-03-06",
+    "entries": [
+      "The user initiates a casual conversation without specific topics, expressing openness to discuss various aspects of their day or any other interests.",
+      "The user expresses a desire to engage in casual conversation without any specific topic."
+    ]
+  }
+}
