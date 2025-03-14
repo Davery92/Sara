@@ -24,11 +24,21 @@ document.addEventListener('DOMContentLoaded', async function() {
     const serverUrlInput = document.getElementById('server-url');
     const saveSettingsBtn = document.getElementById('save-settings');
     const testConnectionBtn = document.getElementById('test-connection');
+
+    // TTS elements and state
+    const ttsToggle = document.getElementById('tts-toggle');
+    const voiceSelector = document.getElementById('tts-voice');
+    const voiceSelectorContainer = document.getElementById('voice-selector-container');
     
     // Chat management variables
     let loadingResponse = false;
     let chatHistory = [];
     let serverUrl = await window.api.getServerUrl();
+
+    // TTS state
+    let ttsEnabled = false;
+    let currentTTSAudio = null;
+    let isPlayingTTS = false;
     
     // Set the initial server URL in the input
     serverUrlInput.value = serverUrl;
@@ -136,6 +146,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     
     // Initialize the chat interface
     initializeChat();
+
+    // Initialize TTS
+    setupTTS();
 
     // Function to test connection to the server
     async function testConnection(showSuccessNotification = false) {
@@ -438,7 +451,11 @@ document.addEventListener('DOMContentLoaded', async function() {
                     }
                 }
             }
-            
+            if (assistantResponse && ttsEnabled) {
+                setTimeout(() => {
+                  generateTTS(assistantResponse, assistantMessageElement);
+                }, 200);
+              }
             // Update chat history with the assistant's response if we received one
             if (assistantResponse) {
                 chatHistory.push({ role: 'assistant', content: assistantResponse });
@@ -490,9 +507,273 @@ document.addEventListener('DOMContentLoaded', async function() {
         // Fix scrolling
         fixScrolling();
         
+        if (isNew && role === 'assistant' && ttsEnabled) {
+            // Generate TTS for new assistant messages if TTS is enabled
+            setTimeout(() => {
+              generateTTS(content, messageElement);
+            }, 200);
+          }
+
         // Return the message element (useful for streaming updates)
         return messageElement;
     }
+
+    async function setupTTS() {
+        try {
+          // Get TTS preferences
+          const prefs = await window.tts.getPreferences();
+          
+          // Set initial state
+          ttsEnabled = prefs.enabled;
+          ttsToggle.checked = ttsEnabled;
+          
+          if (ttsEnabled) {
+            voiceSelectorContainer.style.display = 'block';
+          }
+          
+          // Try to load available voices
+          const voices = await window.tts.getVoices();
+          if (voices && voices.length > 0) {
+            // Clear existing options
+            voiceSelector.innerHTML = '';
+            
+            // Add each voice as an option
+            voices.forEach(voice => {
+              const option = document.createElement('option');
+              option.value = voice.id;
+              option.textContent = voice.name;
+              voiceSelector.appendChild(option);
+            });
+            
+            // Set selected voice from preferences
+            if (prefs.voice) {
+              voiceSelector.value = prefs.voice;
+            }
+          }
+          
+          // Check TTS service status if enabled
+          if (ttsEnabled) {
+            const status = await window.tts.checkStatus();
+            if (!status) {
+              showNotification('TTS service is not available', 'error');
+            }
+          }
+          
+          // Toggle TTS when the switch is clicked
+          ttsToggle.addEventListener('change', function() {
+            ttsEnabled = this.checked;
+            voiceSelectorContainer.style.display = ttsEnabled ? 'block' : 'none';
+            
+            // Save preference
+            window.tts.savePreferences(ttsEnabled, voiceSelector.value, 1.0);
+            
+            if (ttsEnabled) {
+              // Check TTS service status
+              window.tts.checkStatus().then(status => {
+                if (!status) {
+                  showNotification('TTS service is not available', 'error');
+                }
+              });
+            }
+          });
+          
+          // Save voice preference when changed
+          voiceSelector.addEventListener('change', function() {
+            window.tts.savePreferences(ttsEnabled, this.value, 1.0);
+          });
+          
+        } catch (error) {
+          console.error('Error setting up TTS:', error);
+        }
+      }
+      
+      // Function to clean text for TTS
+      function cleanTextForTTS(text) {
+        // Remove markdown formatting
+        text = text.replace(/```[\s\S]*?```/g, ''); // Remove code blocks
+        text = text.replace(/`([^`]+)`/g, '$1'); // Remove inline code
+        text = text.replace(/\*\*([^*]+)\*\*/g, '$1'); // Remove bold
+        text = text.replace(/\*([^*]+)\*/g, '$1'); // Remove italic
+        text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'); // Replace links with just the text
+        text = text.replace(/\n/g, ' '); // Replace newlines with spaces
+        
+        return text;
+      }
+      
+      // Function to generate and play TTS for a given text
+      async function generateTTS(text, messageElement) {
+        if (!ttsEnabled || !text) return;
+        
+        // Skip if this message already has TTS generating or generated
+        if (messageElement.dataset.ttsStatus === 'generating' || 
+            messageElement.dataset.ttsStatus === 'generated') {
+          return;
+        }
+        
+        // Mark this message as TTS generating
+        messageElement.dataset.ttsStatus = 'generating';
+        
+        // Get selected voice
+        const voice = voiceSelector.value;
+        
+        // Create audio controls if they don't exist
+        let audioControls = messageElement.querySelector('.audio-controls');
+        if (!audioControls) {
+          audioControls = document.createElement('div');
+          audioControls.className = 'audio-controls';
+          audioControls.innerHTML = `
+            <button class="play-button">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+            </button>
+            <div class="audio-status">Ready to play</div>
+          `;
+          
+          // Add to message
+          messageElement.querySelector('.message-content').appendChild(audioControls);
+        }
+        
+        // Get play button and status
+        const playButton = audioControls.querySelector('.play-button');
+        const audioStatus = audioControls.querySelector('.audio-status');
+        
+        // Set loading state
+        playButton.innerHTML = '<div class="audio-loading"></div>';
+        playButton.disabled = true;
+        audioStatus.textContent = 'Generating audio...';
+        
+        try {
+          // Clean text for TTS
+          const cleanedText = cleanTextForTTS(text);
+          
+          // Get audio file path from main process
+          const audioPath = await window.tts.generateSpeech(cleanedText, voice, 1.0);
+          
+          // Mark as generated
+          messageElement.dataset.ttsStatus = 'generated';
+          messageElement.dataset.audioPath = audioPath;
+          
+          // Reset play button
+          playButton.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+          `;
+          playButton.disabled = false;
+          audioStatus.textContent = 'Ready to play';
+          
+          // Create audio element
+          const audio = new Audio();
+          audio.src = 'file://' + audioPath;
+          
+          // Store audio in message element
+          messageElement.audio = audio;
+          
+          // Add event listener to play button
+          playButton.addEventListener('click', function() {
+            // Stop any currently playing audio
+            if (currentTTSAudio && currentTTSAudio !== audio) {
+              currentTTSAudio.pause();
+              currentTTSAudio.currentTime = 0;
+              
+              // Reset the play button of any other message that was playing
+              document.querySelectorAll('.chat-message').forEach(msg => {
+                if (msg !== messageElement && msg.querySelector('.play-button')) {
+                  msg.querySelector('.play-button').innerHTML = `
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                  `;
+                  
+                  if (msg.querySelector('.audio-status')) {
+                    msg.querySelector('.audio-status').textContent = 'Ready to play';
+                  }
+                }
+              });
+            }
+            
+            // Set as current audio
+            currentTTSAudio = audio;
+            
+            // Check if audio is paused or ended
+            if (audio.paused || audio.ended) {
+              audio.play();
+              
+              // Update UI for playing state
+              playButton.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="6" y="4" width="4" height="16"></rect>
+                  <rect x="14" y="4" width="4" height="16"></rect>
+                </svg>
+              `;
+              audioStatus.textContent = 'Playing...';
+            } else {
+              // Pause if already playing
+              audio.pause();
+              
+              // Update UI for paused state
+              playButton.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+              `;
+              audioStatus.textContent = 'Paused';
+            }
+          });
+          
+          // Add ended event listener
+          audio.addEventListener('ended', function() {
+            // Reset play button
+            playButton.innerHTML = `
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+            `;
+            audioStatus.textContent = 'Ready to play';
+          });
+          
+          // Auto-play if enabled
+          if (ttsEnabled) {
+            // Stop any currently playing audio
+            if (currentTTSAudio && currentTTSAudio !== audio) {
+              currentTTSAudio.pause();
+              currentTTSAudio.currentTime = 0;
+            }
+            
+            // Set as current audio
+            currentTTSAudio = audio;
+            
+            // Play the audio
+            audio.play();
+            
+            // Update UI for playing state
+            playButton.innerHTML = `
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="6" y="4" width="4" height="16"></rect>
+                <rect x="14" y="4" width="4" height="16"></rect>
+              </svg>
+            `;
+            audioStatus.textContent = 'Playing...';
+          }
+        } catch (error) {
+          console.error('TTS error:', error);
+          
+          // Reset TTS status on error
+          messageElement.dataset.ttsStatus = 'error';
+          
+          // Reset play button with error state
+          playButton.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          `;
+          playButton.disabled = true;
+          audioStatus.textContent = 'Error generating audio';
+        }
+      }
+
 
     // Function to add loading indicator
     function addLoadingIndicator() {

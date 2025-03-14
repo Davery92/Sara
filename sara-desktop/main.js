@@ -2,6 +2,9 @@
 const { app, BrowserWindow, ipcMain, Menu, dialog } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
 
 // Initialize settings store
 const store = new Store({
@@ -136,4 +139,119 @@ ipcMain.handle('get-server-url', () => {
 ipcMain.handle('set-server-url', (_, url) => {
   store.set('serverUrl', url);
   return true;
+});
+ipcMain.handle('tts-get-voices', async () => {
+  try {
+    const serverUrl = store.get('serverUrl', 'http://localhost:7009');
+    const response = await fetch(`${serverUrl}/v1/tts/voices`);
+    
+    if (response.ok) {
+      const data = await response.json();
+      return data.voices || [];
+    } else {
+      console.error('Error fetching voices:', response.statusText);
+      return [
+        {"id": "af_bella", "name": "Bella (African)"},
+        {"id": "en_jony", "name": "Jony (English)"},
+        {"id": "en_rachel", "name": "Rachel (English)"},
+        {"id": "en_emma", "name": "Emma (English)"},
+        {"id": "en_antoni", "name": "Antoni (English)"}
+      ];
+    }
+  } catch (error) {
+    console.error('Error fetching voices:', error);
+    return [
+      {"id": "af_bella", "name": "Bella (African)"},
+      {"id": "en_jony", "name": "Jony (English)"},
+      {"id": "en_rachel", "name": "Rachel (English)"}
+    ];
+  }
+});
+
+ipcMain.handle('tts-generate-speech', async (event, text, voice, speed) => {
+  try {
+    const serverUrl = store.get('serverUrl', 'http://localhost:7009');
+    const userDataPath = app.getPath('userData');
+    const tempAudioPath = path.join(userDataPath, 'temp-audio.mp3');
+    
+    // Make sure the text isn't too long
+    if (text.length > 3000) {
+      text = text.substring(0, 3000) + "... (text truncated for speech)";
+    }
+    
+    // Create request to TTS endpoint
+    const response = await fetch(`${serverUrl}/v1/tts/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text: text,
+        voice: voice || 'en_jony',
+        speed: speed || 1.0
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`TTS request failed with status ${response.status}`);
+    }
+    
+    // Get the audio data as a buffer
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    // Save to temp file
+    fs.writeFileSync(tempAudioPath, buffer);
+    
+    return tempAudioPath;
+  } catch (error) {
+    console.error('Error generating speech:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('tts-check-status', async () => {
+  try {
+    const serverUrl = store.get('serverUrl', 'http://localhost:7009');
+    const response = await fetch(`${serverUrl}/v1/tts/status`);
+    
+    if (response.ok) {
+      const data = await response.json();
+      return data.status === 'online';
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Error checking TTS status:', error);
+    return false;
+  }
+});
+
+ipcMain.handle('tts-save-preferences', async (event, enabled, voice, speed) => {
+  try {
+    store.set('tts.enabled', enabled);
+    store.set('tts.voice', voice);
+    store.set('tts.speed', speed);
+    return true;
+  } catch (error) {
+    console.error('Error saving TTS preferences:', error);
+    return false;
+  }
+});
+
+ipcMain.handle('tts-get-preferences', async () => {
+  try {
+    return {
+      enabled: store.get('tts.enabled', false),
+      voice: store.get('tts.voice', 'en_jony'),
+      speed: store.get('tts.speed', 1.0)
+    };
+  } catch (error) {
+    console.error('Error getting TTS preferences:', error);
+    return {
+      enabled: false,
+      voice: 'en_jony',
+      speed: 1.0
+    };
+  }
 });

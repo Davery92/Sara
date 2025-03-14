@@ -34,10 +34,13 @@ from modules.rag_integration import integrate_rag_with_server, update_system_pro
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, Response
 import psutil
 from modules.neo4j_connection import check_neo4j_connection
 import tiktoken
+from openai import OpenAI
+import requests
+import re
 
 
 # Initialize the message store with Neo4j backend
@@ -69,6 +72,12 @@ NOTES_DIRECTORY = "/home/david/Sara/notes"
 
 MESSAGE_HISTORY = []
 MAX_HISTORY = 60  # Maximum number of messages (excluding system prompt)
+
+tts_client = OpenAI(
+    base_url="http://10.185.1.8:8880/v1", 
+    api_key="not-needed"
+)
+
 
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
@@ -108,6 +117,7 @@ MODEL_URLS = {
     "mistral-small": "http://localhost:11434/api/chat",
     "command-r7b": "http://localhost:11434/api/chat",
     "default": "http://localhost:11434/api/chat",
+    "qwen2.5:14b": "http://localhost:11434/api/chat",
     "qwen2.5:32b": "http://localhost:11434/api/chat"
 }
 
@@ -3003,50 +3013,156 @@ async def check_neo4j_direct():
         logger.error(f"Error in direct Neo4j check: {e}")
         return {"status": "Error"}
 
-@app.get("/v1/stats/tokens")
-async def get_token_stats():
-    """Get current token statistics for the dashboard"""
-    try:
-        # Try to get the stats from Redis
-        token_stats_json = None
-        if hasattr(message_store, 'client') and hasattr(message_store.client, 'redis_client'):
-            token_stats_json = message_store.client.redis_client.get("token_stats")
-        elif hasattr(message_store, 'message_store'):
-            token_stats_json = message_store.message_store.get("token_stats")
-        elif hasattr(message_store, 'redis_client'):
-            token_stats_json = message_store.redis_client.get("token_stats")
-        
-        if token_stats_json:
-            if isinstance(token_stats_json, bytes):
-                token_stats_json = token_stats_json.decode('utf-8')
-                
-            # Parse the JSON
-            token_stats = json.loads(token_stats_json)
-        else:
-            # Calculate current stats if not in Redis
-            _, token_stats = get_messages_with_system_prompt()
-        
-        # Ensure the response has all the expected fields
-        response = {
-            'total_tokens': token_stats.get('total_tokens', 0),
-            'system_tokens': token_stats.get('system_tokens', 0),
-            'history_tokens': token_stats.get('history_tokens', 0),
-            'token_limit': 100000,  # Default limit
-            'remaining_tokens': 100000 - token_stats.get('total_tokens', 0)
-        }
-        
-        return response
-    except Exception as e:
-        logger.error(f"Error retrieving token stats: {str(e)}")
-        # Return default stats if there's an error
-        return {
-            'total_tokens': 0,
-            'system_tokens': 0,
-            'history_tokens': 0,
-            'token_limit': 100000,
-            'remaining_tokens': 100000
-        }
+# Add this code to your server.py file
 
+def clean_text_for_tts(text):
+    """Clean text for TTS by removing emojis, asterisks, and other special characters"""
+    # Remove emoji pattern
+    emoji_pattern = re.compile("["
+                               u"\U0001F600-\U0001F64F"  # emoticons
+                               u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+                               u"\U0001F680-\U0001F6FF"  # transport & map symbols
+                               u"\U0001F700-\U0001F77F"  # alchemical symbols
+                               u"\U0001F780-\U0001F7FF"  # Geometric Shapes
+                               u"\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
+                               u"\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
+                               u"\U0001FA00-\U0001FA6F"  # Chess Symbols
+                               u"\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+                               u"\U00002702-\U000027B0"  # Dingbats
+                               u"\U000024C2-\U0001F251" 
+                               "]+", flags=re.UNICODE)
+    text = emoji_pattern.sub(r'', text)
+    
+    # Remove markdown formatting characters
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)  # Bold: **text** to text
+    text = re.sub(r'\*(.+?)\*', r'\1', text)      # Italic: *text* to text
+    text = re.sub(r'__(.+?)__', r'\1', text)      # Underline: __text__ to text
+    text = re.sub(r'_(.+?)_', r'\1', text)        # Italic with underscore: _text_ to text
+    
+    # Remove code blocks and inline code
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)  # Remove code blocks
+    text = re.sub(r'`(.+?)`', r'\1', text)        # Inline code: `text` to text
+    
+    # Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
+    
+    # Convert common symbols to their spoken form
+    text = text.replace('&', ' and ')
+    text = text.replace('%', ' percent ')
+    text = text.replace('/', ' slash ')
+    text = text.replace('=', ' equals ')
+    
+    # Remove excess whitespace and newlines
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    
+    return text
+
+@app.post("/v1/tts/generate")
+async def generate_speech(request: dict = Body(...)):
+    """Generate speech from text using TTS API"""
+    try:
+        text = request.get("text", "")
+        voice = request.get("voice", "af_bella")  # Default to af_bella only if not provided
+        speed = request.get("speed", 1.0)
+        
+        if not text:
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        # Clean the text for better TTS rendering
+        cleaned_text = clean_text_for_tts(text)
+        
+        logger.info(f"Generating speech for text of length {len(cleaned_text)} with voice {voice}")
+        
+        # Use the simpler request approach
+        try:
+            # Make a direct request to the TTS API
+            response = requests.post(
+                "http://10.185.1.8:8880/v1/audio/speech",
+                json={
+                    "model": "kokoro",
+                    "input": cleaned_text,
+                    "voice": voice,  # Use the voice provided in the request
+                    "response_format": "mp3",
+                    "speed": speed
+                }
+            )
+            
+            # Raise an error if the request failed
+            response.raise_for_status()
+            
+            # Return the audio data directly
+            return Response(
+                content=response.content,
+                media_type="audio/mpeg"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating speech: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+        
+    except Exception as e:
+        logger.error(f"Error in TTS endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+
+# Add a voice list endpoint that actually queries the TTS service
+@app.get("/v1/tts/voices")
+async def list_voices():
+    """List available TTS voices from the TTS service"""
+    try:
+        # Try to query the TTS service for voices
+        try:
+            response = requests.get("http://10.185.1.8:8880/v1/audio/voices", timeout=3)
+            
+            if response.status_code == 200:
+                # Log successful response
+                voices_data = response.json()
+                logger.info(f"Successfully fetched voices from TTS service: {voices_data}")
+                return voices_data
+            else:
+                # Log error response
+                logger.warning(f"TTS service returned non-200 status: {response.status_code}")
+        except requests.RequestException as e:
+            logger.warning(f"Error connecting to TTS service: {str(e)}")
+        
+        # Fallback voices - return these if we couldn't connect to the service
+        # or if the service didn't return valid data
+        fallback_voices = [
+            {"id": "af_bella", "name": "Bella (African)"},
+            {"id": "en_jony", "name": "Jony (English)"},
+            {"id": "en_rachel", "name": "Rachel (English)"},
+            {"id": "en_emma", "name": "Emma (English)"},
+            {"id": "en_antoni", "name": "Antoni (English)"}
+        ]
+        
+        logger.info("Using fallback voices list")
+        return {"voices": fallback_voices}
+        
+    except Exception as e:
+        # Log any unexpected errors
+        logger.error(f"Unexpected error in list_voices: {str(e)}")
+        
+        # Always return something usable, even if there's an error
+        fallback_voices = [
+            {"id": "af_bella", "name": "Bella (African)"},
+            {"id": "en_jony", "name": "Jony (English)"}
+        ]
+        return {"voices": fallback_voices}
+
+# Add a health check endpoint for the TTS service
+@app.get("/v1/tts/status")
+async def tts_status():
+    """Check TTS service status"""
+    try:
+        # Try to get voices as a status check
+        response = requests.get("http://10.185.1.8:8880/v1/audio/voices")
+        
+        if response.status_code == 200:
+            return {"status": "online", "message": "TTS service is available"}
+        else:
+            return {"status": "error", "message": f"TTS service returned status code {response.status_code}"}
+    except Exception as e:
+        return {"status": "offline", "message": f"TTS service is unavailable: {str(e)}"}
 
 @app.get("/health", status_code=200)
 async def health_check():

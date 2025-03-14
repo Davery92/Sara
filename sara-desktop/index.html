@@ -35,6 +35,34 @@
             </div>
 
             <div class="sidebar-footer">
+                <div id="tts-container" class="tts-container">
+                    <div class="tts-toggle-container">
+                      <label class="tts-toggle-label">
+                        <svg class="speech-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M12 6v12"></path>
+                          <path d="M8 8v8"></path>
+                          <path d="M16 8v8"></path>
+                          <path d="M20 10v4"></path>
+                          <path d="M4 10v4"></path>
+                        </svg>
+                        Text-to-Speech
+                        <span class="tts-toggle-switch">
+                          <input type="checkbox" id="tts-toggle">
+                          <span class="tts-toggle-slider"></span>
+                        </span>
+                      </label>
+                    </div>
+                    <div id="voice-selector-container" style="display: none; margin-top: 12px;">
+                      <label for="tts-voice" style="display: block; margin-bottom: 4px; color: var(--muted-color); font-size: 12px;">TTS Voice</label>
+                      <select id="tts-voice" class="voice-selector">
+                        <option value="af_bella">Bella (African)</option>
+                        <option value="en_jony">Jony (English)</option>
+                        <option value="en_rachel">Rachel (English)</option>
+                        <option value="en_emma">Emma (English)</option>
+                        <option value="en_antoni">Antoni (English)</option>
+                      </select>
+                    </div>
+                </div>
                 <button class="sidebar-footer-button" id="clear-chat">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M3 6h18"></path>

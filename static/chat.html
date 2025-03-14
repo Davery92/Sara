@@ -564,6 +564,157 @@
                 padding-bottom: 100px;
             }
         }
+        .tts-toggle-container {
+            display: flex;
+            align-items: center;
+            margin-left: auto;
+            margin-right: 16px;
+        }
+
+        .tts-toggle-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+            color: var(--muted-color);
+            font-size: 14px;
+        }
+
+        .tts-toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 36px;
+            height: 20px;
+        }
+
+        .tts-toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .tts-toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: var(--border-color);
+            transition: .4s;
+            border-radius: 20px;
+        }
+
+        .tts-toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 2px;
+            bottom: 2px;
+            background-color: var(--text-color);
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .tts-toggle-slider {
+            background-color: var(--accent-color);
+        }
+
+        input:checked + .tts-toggle-slider:before {
+            transform: translateX(16px);
+        }
+
+        /* Audio controls */
+        .audio-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .play-button {
+            background-color: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .play-button:hover {
+            background-color: var(--accent-hover);
+        }
+
+        .play-button:disabled {
+            background-color: var(--border-color);
+            cursor: not-allowed;
+        }
+
+        .voice-selector {
+            background-color: var(--input-bg);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 12px;
+            max-width: 120px;
+        }
+
+        /* Loading animation for audio */
+        .audio-loading {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: var(--accent-color);
+            animation: audio-spin 1s ease-in-out infinite;
+        }
+
+        @keyframes audio-spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Speech icon in header */
+        .speech-icon {
+            width: 16px;
+            height: 16px;
+            margin-right: 4px;
+        }
+        #voice-selector-container {
+            margin-bottom: 12px;
+            width: 100%;
+            display: block; /* Ensure it's displayed by default */
+        }
+
+        #tts-voice {
+            background-color: var(--input-bg);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 14px;
+            width: 100%;
+            max-width: 100%; /* Make sure it fits the container */
+            height: auto; /* Ensure it has height */
+            appearance: auto; /* Ensure the dropdown arrow appears */
+            -webkit-appearance: menulist; /* For Safari/Chrome */
+            -moz-appearance: menulist; /* For Firefox */
+        }
+
+        /* Make sure the text is visible */
+        #tts-voice option {
+            background-color: var(--input-bg);
+            color: var(--text-color);
+            padding: 4px;
+        }
     </style>
 </head>
 <body>
@@ -613,6 +764,23 @@
         </div>
 
         <div class="sidebar-footer">
+            <div id="voice-selector-container" style="margin-bottom: 12px; display: block; padding: 10px; border: 1px solid #444; border-radius: 5px; background-color: #262b38;">
+                <label for="tts-voice" style="display: block; margin-bottom: 8px; color: #e2e8f0; font-size: 14px; font-weight: bold;">Voice Selection</label>
+                
+                <!-- Hard-coded select with options already included -->
+                <select id="tts-voice" style="width: 100%; padding: 8px; background-color: #1e222f; color: #e2e8f0; border: 1px solid #2d3748; border-radius: 4px; font-size: 14px; -webkit-appearance: menulist; -moz-appearance: menulist; appearance: menulist;">
+                    <option value="af_bella">Bella (African)</option>
+                    <option value="en_jony">Jony (English)</option>
+                    <option value="en_rachel">Rachel (English)</option>
+                    <option value="en_emma">Emma (English)</option>
+                    <option value="en_antoni">Antoni (English)</option>
+                </select>
+                
+                <div style="margin-top: 8px; font-size: 12px; color: #8e8ea0;">
+                    Choose a voice for text-to-speech
+                </div>
+            </div>
+            
             <button class="sidebar-footer-button" id="clear-chat">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M3 6h18"></path>
@@ -635,7 +803,24 @@
         </button>
 
         <div class="chat-header">
-            <h1>Sara AI Assistant</h1>
+            <h1>Sara</h1>
+        </div>
+
+        <div class="tts-toggle-container">
+            <label class="tts-toggle-label">
+                <svg class="speech-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 6v12"></path>
+                    <path d="M8 8v8"></path>
+                    <path d="M16 8v8"></path>
+                    <path d="M20 10v4"></path>
+                    <path d="M4 10v4"></path>
+                </svg>
+                Text-to-Speech
+                <span class="tts-toggle-switch">
+                    <input type="checkbox" id="tts-toggle">
+                    <span class="tts-toggle-slider"></span>
+                </span>
+            </label>
         </div>
 
         <!-- Empty state (shown when no conversation is active) -->
@@ -695,6 +880,28 @@
             const messageInput = document.getElementById('message-input');
             const sendButton = document.getElementById('send-button');
             const suggestionChips = document.querySelectorAll('.suggestion-chip');
+            const ttsToggle = document.getElementById('tts-toggle');
+            const voiceSelectorContainer = document.getElementById('voice-selector-container');
+            const voiceSelector = document.getElementById('tts-voice');
+
+
+            console.log('Voice selector container:', voiceSelectorContainer);
+            console.log('Voice selector dropdown:', voiceSelector);
+            if (localStorage.getItem('ttsEnabled') === 'true') {
+                console.log('TTS is enabled, showing voice selector container');
+                if (voiceSelectorContainer) {
+                    voiceSelectorContainer.style.display = 'block';
+                }
+            } else {
+                console.log('TTS is disabled, hiding voice selector container');
+                if (voiceSelectorContainer) {
+                    voiceSelectorContainer.style.display = 'none';
+                }
+            }
+            // TTS state
+            let ttsEnabled = false;
+            let currentTTSAudio = null;
+            let isPlayingTTS = false;
 
             // Chat management variables
             let loadingResponse = false;
@@ -758,7 +965,10 @@
                     chatHistory = [];
                 }
             });
-
+            window.generateTTS = generateTTS;
+            window.checkTTSStatus = checkTTSStatus;
+            window.ttsEnabled = ttsEnabled;
+            setupTTS();
             // Initialize the chat interface
             initializeChat();
 
@@ -815,6 +1025,339 @@
                 }
             }
 
+            function setupTTS() {
+                console.log("Setting up TTS functionality...");
+                
+                // Try to load TTS preference from localStorage
+                const savedTTSEnabled = localStorage.getItem('ttsEnabled');
+                if (savedTTSEnabled === 'true') {
+                    ttsToggle.checked = true;
+                    ttsEnabled = true;
+                    voiceSelectorContainer.style.display = 'block';
+                    console.log("TTS enabled from saved preferences");
+                } else {
+                    voiceSelectorContainer.style.display = 'none';
+                    console.log("TTS disabled from saved preferences");
+                }
+
+                // Try to load voice preference from localStorage
+                const savedVoice = localStorage.getItem('ttsVoice');
+                if (savedVoice && voiceSelector) {
+                    // Set the dropdown to the saved voice
+                    for (let i = 0; i < voiceSelector.options.length; i++) {
+                        if (voiceSelector.options[i].value === savedVoice) {
+                            voiceSelector.selectedIndex = i;
+                            console.log(`Restored saved voice: ${savedVoice}`);
+                            break;
+                        }
+                    }
+                } else if (voiceSelector && voiceSelector.options.length > 0) {
+                    // Save the first voice as default if none is saved
+                    localStorage.setItem('ttsVoice', voiceSelector.options[0].value);
+                    console.log(`Set default voice: ${voiceSelector.options[0].value}`);
+                }
+
+                // Toggle TTS when the switch is clicked
+                ttsToggle.addEventListener('change', function() {
+                    ttsEnabled = this.checked;
+                    console.log(`TTS ${ttsEnabled ? 'enabled' : 'disabled'}`);
+                    
+                    // Save preference to localStorage
+                    localStorage.setItem('ttsEnabled', ttsEnabled);
+                    
+                    // Show/hide voice selector
+                    voiceSelectorContainer.style.display = ttsEnabled ? 'block' : 'none';
+                    
+                    if (ttsEnabled) {
+                        // Check TTS service status
+                        checkTTSStatus();
+                    }
+                });
+
+                // Save voice preference when changed
+                if (voiceSelector) {
+                    voiceSelector.addEventListener('change', function() {
+                        const selectedVoice = this.value;
+                        console.log(`Voice changed to: ${selectedVoice}`);
+                        localStorage.setItem('ttsVoice', selectedVoice);
+                    });
+                }
+                
+                // Initial TTS status check if enabled
+                if (ttsEnabled) {
+                    checkTTSStatus();
+                }
+                
+                console.log("TTS setup complete");
+            }
+
+            // For debugging: expose the function globally
+            window.setupTTS = setupTTS;
+
+            // Check TTS service status
+            function checkTTSStatus() {
+                console.log("Checking TTS service status...");
+                fetch('/v1/tts/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log("TTS service status:", data);
+                    })
+                    .catch(error => {
+                        console.error('Error checking TTS status:', error);
+                    });
+            }
+
+            function directlyPopulateVoiceSelector() {
+                // Get a direct reference to the dropdown
+                const voiceSelector = document.getElementById('tts-voice');
+                
+                if (!voiceSelector) {
+                    console.error('Voice selector element not found!');
+                    return false;
+                }
+                
+                console.log('Voice selector found:', voiceSelector);
+                
+                // Make sure the container is visible
+                const container = document.getElementById('voice-selector-container');
+                if (container) {
+                    container.style.display = 'block';
+                    console.log('Voice selector container visible');
+                } else {
+                    console.error('Voice selector container not found!');
+                }
+                
+                // Clear existing options
+                voiceSelector.innerHTML = '';
+                console.log('Cleared existing options');
+                
+                // Hard-coded list of voices
+                const voices = [
+                    {id: "af_bella", name: "Bella (African)"},
+                    {id: "en_jony", name: "Jony (English)"},
+                    {id: "en_rachel", name: "Rachel (English)"},
+                    {id: "en_emma", name: "Emma (English)"},
+                    {id: "en_antoni", name: "Antoni (English)"}
+                ];
+                
+                // Add options
+                voices.forEach(voice => {
+                    try {
+                        const option = document.createElement('option');
+                        option.value = voice.id;
+                        option.textContent = voice.name;
+                        voiceSelector.appendChild(option);
+                        console.log(`Added voice option: ${voice.id} - ${voice.name}`);
+                    } catch (e) {
+                        console.error(`Error adding voice option ${voice.id}:`, e);
+                    }
+                });
+                
+                console.log('Final dropdown HTML:', voiceSelector.innerHTML);
+                console.log('Number of options:', voiceSelector.options.length);
+                
+                return true;
+            }
+
+            // Generate TTS from text
+            function generateTTS(text, messageElement) {
+                console.log("Generate TTS called");
+                
+                if (!ttsEnabled || !text) {
+                    console.log("TTS disabled or no text provided - skipping");
+                    return;
+                }
+                
+                // Skip if this message already has TTS generating or generated
+                if (messageElement.dataset.ttsStatus === 'generating' || 
+                    messageElement.dataset.ttsStatus === 'generated') {
+                    console.log('TTS already generated or in progress for this message - skipping');
+                    return;
+                }
+                
+                // Mark this message as TTS generating
+                messageElement.dataset.ttsStatus = 'generating';
+                
+                // Get selected voice with fallback
+                let voice = "af_bella"; // Default fallback
+                
+                try {
+                    if (voiceSelector && voiceSelector.value) {
+                        voice = voiceSelector.value;
+                    } else {
+                        voice = localStorage.getItem('ttsVoice') || "af_bella";
+                    }
+                } catch (e) {
+                    console.error("Error getting voice selection:", e);
+                    // Use default voice if there's an error
+                }
+                
+                console.log(`Generating TTS with voice: ${voice} for text of length ${text.length}`);
+                
+                // Create audio controls if they don't exist
+                let audioControls = messageElement.querySelector('.audio-controls');
+                if (!audioControls) {
+                    audioControls = document.createElement('div');
+                    audioControls.className = 'audio-controls';
+                    audioControls.innerHTML = `
+                        <button class="play-button">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                            </svg>
+                        </button>
+                        <div class="audio-status">Ready to play</div>
+                    `;
+                    
+                    // Add to message
+                    messageElement.querySelector('.message-content').appendChild(audioControls);
+                }
+                
+                // Get play button and status
+                const playButton = audioControls.querySelector('.play-button');
+                const audioStatus = audioControls.querySelector('.audio-status');
+                
+                // Set loading state
+                playButton.innerHTML = '<div class="audio-loading"></div>';
+                playButton.disabled = true;
+                audioStatus.textContent = 'Generating audio...';
+                
+                console.log("Making TTS API request...");
+                
+                // Create fetch request for TTS
+                fetch('/v1/tts/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        text: text,
+                        voice: voice,
+                        speed: 1.0
+                    })
+                })
+                .then(response => {
+                    console.log("TTS API response status:", response.status);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response.blob();
+                })
+                .then(blob => {
+                    console.log("TTS blob received, size:", blob.size);
+                    
+                    // Mark as generated
+                    messageElement.dataset.ttsStatus = 'generated';
+                    
+                    // Create audio element from the completed blob
+                    const audio = new Audio(URL.createObjectURL(blob));
+                    
+                    // Store audio in message element
+                    messageElement.audio = audio;
+                    
+                    // Reset play button
+                    playButton.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                        </svg>
+                    `;
+                    playButton.disabled = false;
+                    audioStatus.textContent = 'Ready to play';
+                    
+                    // Add event listener to play button
+                    playButton.addEventListener('click', function() {
+                        // Stop any currently playing audio
+                        if (currentTTSAudio && currentTTSAudio !== audio) {
+                            currentTTSAudio.pause();
+                            currentTTSAudio.currentTime = 0;
+                        }
+                        
+                        // Set as current audio
+                        currentTTSAudio = audio;
+                        
+                        // Check if audio is paused or ended
+                        if (audio.paused || audio.ended) {
+                            console.log("Playing audio");
+                            audio.play();
+                            
+                            // Update UI for playing state
+                            playButton.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="6" y="4" width="4" height="16"></rect>
+                                    <rect x="14" y="4" width="4" height="16"></rect>
+                                </svg>
+                            `;
+                            audioStatus.textContent = 'Playing...';
+                        } else {
+                            // Pause if already playing
+                            console.log("Pausing audio");
+                            audio.pause();
+                            
+                            // Update UI for paused state
+                            playButton.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                </svg>
+                            `;
+                            audioStatus.textContent = 'Paused';
+                        }
+                    });
+                    
+                    // Add ended event listener
+                    audio.addEventListener('ended', function() {
+                        console.log("Audio playback ended");
+                        // Reset play button
+                        playButton.innerHTML = `
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                            </svg>
+                        `;
+                        audioStatus.textContent = 'Ready to play';
+                    });
+                    
+                    // Auto-play if enabled
+                    if (ttsEnabled) {
+                        console.log("Auto-playing audio");
+                        // Stop any currently playing audio
+                        if (currentTTSAudio && currentTTSAudio !== audio) {
+                            currentTTSAudio.pause();
+                            currentTTSAudio.currentTime = 0;
+                        }
+                        
+                        // Set as current audio
+                        currentTTSAudio = audio;
+                        
+                        // Play the audio
+                        audio.play();
+                        
+                        // Update UI for playing state
+                        playButton.innerHTML = `
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="6" y="4" width="4" height="16"></rect>
+                                <rect x="14" y="4" width="4" height="16"></rect>
+                            </svg>
+                        `;
+                        audioStatus.textContent = 'Playing...';
+                    }
+                })
+                .catch(error => {
+                    console.error('TTS error:', error);
+                    
+                    // Reset TTS status on error
+                    messageElement.dataset.ttsStatus = 'error';
+                    
+                    // Reset play button with error state
+                    playButton.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    `;
+                    playButton.disabled = true;
+                    audioStatus.textContent = 'Error generating audio';
+                });
+            }
+
+            
 
             // Find the existing startNewChat function in the script
             function startNewChat() {
@@ -956,13 +1499,13 @@
                 // Add to chat history array
                 chatHistory.push({ role: 'user', content: message });
                 
-                // Build complete history for context (important for conversation context)
+                // Build complete history for context
                 const completeHistory = chatHistory.slice();
                 
                 // Prepare the request payload
                 const payload = {
                     model: "gpt-4o", // This will be mapped to your local model
-                    messages: completeHistory, // Send the entire conversation for context
+                    messages: completeHistory,
                     stream: true
                 };
                 
@@ -983,11 +1526,19 @@
                     const reader = response.body.getReader();
                     let assistantResponse = '';
                     let assistantMessageElement = null;
+                    let ttsGenerated = false; // Flag to track if TTS has been generated
                     
                     // Function to process stream chunks
                     function processStream({ done, value }) {
                         if (done) {
                             loadingResponse = false;
+                            
+                            // Generate TTS only if it hasn't been generated yet
+                            if (assistantMessageElement && ttsEnabled && !ttsGenerated) {
+                                ttsGenerated = true; // Mark as generated
+                                generateTTS(assistantResponse, assistantMessageElement);
+                            }
+                            
                             return;
                         }
                         
@@ -1014,11 +1565,12 @@
                                             
                                             // Add assistant message
                                             assistantMessageElement = addMessageToChat('assistant', assistantResponse, true);
+                                            
+                                            // Just mark that this is a streaming message, so we don't generate TTS in addMessageToChat
+                                            assistantMessageElement.dataset.streaming = "true";
                                         } else {
                                             // Update the message content
                                             const contentElement = assistantMessageElement.querySelector('.message-content');
-                                            
-                                            // Process markdown (simplified for this example)
                                             contentElement.innerHTML = formatMessage(assistantResponse);
                                             
                                             // Fix scrolling with each update
@@ -1029,12 +1581,30 @@
                                     // Check if stream is finished
                                     if (jsonData.choices && jsonData.choices[0] && jsonData.choices[0].finish_reason === 'stop') {
                                         loadingResponse = false;
+                                        
+                                        // Add to chat history now that it's complete
+                                        chatHistory.push({ role: 'assistant', content: assistantResponse });
+                                        
+                                        // Generate TTS only once at the end, if it hasn't been generated yet
+                                        if (assistantMessageElement && ttsEnabled && !ttsGenerated) {
+                                            ttsGenerated = true; // Mark as generated
+                                            // Small delay to ensure UI is updated
+                                            setTimeout(() => {
+                                                generateTTS(assistantResponse, assistantMessageElement);
+                                            }, 50);
+                                        }
                                     }
                                 } catch (error) {
                                     console.error('Error parsing event:', error);
                                 }
                             } else if (line === 'data: [DONE]') {
                                 loadingResponse = false;
+                                
+                                // Final TTS check - generate only if not already generated
+                                if (assistantMessageElement && ttsEnabled && !ttsGenerated) {
+                                    ttsGenerated = true; // Mark as generated
+                                    generateTTS(assistantResponse, assistantMessageElement);
+                                }
                             }
                         }
                         
@@ -1055,11 +1625,7 @@
                         addMessageToChat('assistant', errorMsg, true);
                     }
                 });
-                
-                // Update chat history with the new user message
-                chatHistory.push({ role: 'user', content: message });
             }
-
             // Function to add a message to the chat
             function addMessageToChat(role, content, isNew = false) {
                 // Create message element
@@ -1087,9 +1653,19 @@
                 // Append message to chat container
                 document.getElementById('messages-wrapper').appendChild(messageElement);
                 
-                // Update chat history if this is a new message
-                if (isNew && role === 'assistant') {
+                // For non-streaming messages only: update chat history and possibly generate TTS
+                if (isNew && role === 'assistant' && !loadingResponse) {
+                    // Only add to history and generate TTS for non-streaming messages
+                    // (Streaming messages are handled in the sendMessage function)
                     chatHistory.push({ role: 'assistant', content: content });
+                    
+                    // Generate TTS for non-streaming assistant messages if enabled
+                    if (ttsEnabled) {
+                        // Add a small delay to ensure the message is fully rendered
+                        setTimeout(() => {
+                            generateTTS(content, messageElement);
+                        }, 50);
+                    }
                 }
                 
                 // Fix scrolling
