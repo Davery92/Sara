@@ -91,13 +91,13 @@ CORE_MEMORY_FILE = "/home/david/Sara/core_memories.txt"
 # Model mapping from OpenAI to local models
 MODEL_MAPPING = {
     "gpt-4": "llama3.3",
-    "gpt-3.5-turbo": "mistral-small",
+    "gpt-3.5-turbo": "gemma3:12b",
     "gpt-3.5-turbo-0125": "command-r7b",
     "gpt-3.5-turbo-1106": "llama3.2",
     "gpt-4o-mini": "llama3.1",
     "gpt-4o": "qwen2.5:32b",
     # Add more mappings as needed
-    "default": "qwen2.5:32b"
+    "default": "gemma3:27b"
 }
 
 # Available local models
@@ -106,7 +106,9 @@ AVAILABLE_MODELS = [
     "mistral-small:latest",
     "llama3.2:latest",
     "llama3.1:latest",
-    "command-r7b"
+    "command-r7b",
+    "gemma3:27b",
+    "qwen2.5:32b",
 ]
 
 # URLs for different models
@@ -114,11 +116,12 @@ MODEL_URLS = {
     "llama3.3": "http://100.82.117.46:11434/api/chat",
     "llama3.2": "http://localhost:11434/api/chat",
     "llama3.1": "http://localhost:11434/api/chat",
-    "mistral-small": "http://localhost:11434/api/chat",
+    "gemma3:27b": "http://localhost:11434/api/chat",
     "command-r7b": "http://localhost:11434/api/chat",
     "default": "http://localhost:11434/api/chat",
     "qwen2.5:14b": "http://localhost:11434/api/chat",
-    "qwen2.5:32b": "http://localhost:11434/api/chat"
+    "qwen2.5:32b": "http://100.68.183.36:11434/api/chat",
+    "gemma3:12b": "http://localhost:11434/api/chat",
 }
 
 
