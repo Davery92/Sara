@@ -34,6 +34,8 @@ from modules.rag_integration import integrate_rag_with_server, update_system_pro
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
+from modules.intent_classifier import get_intent_classifier
+from modules.intent_tool_mapping import get_tools_for_intent, INTENT_CONFIDENCE_THRESHOLDS
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, Response
 import psutil
 from modules.neo4j_connection import check_neo4j_connection
@@ -113,14 +115,14 @@ AVAILABLE_MODELS = [
 
 # URLs for different models
 MODEL_URLS = {
-    "llama3.3": "http://100.82.117.46:11434/api/chat",
+    "llama3.3": "http://100.104.68.115:11434/api/chat",
     "llama3.2": "http://localhost:11434/api/chat",
     "llama3.1": "http://localhost:11434/api/chat",
     "gemma3:27b": "http://localhost:11434/api/chat",
     "command-r7b": "http://localhost:11434/api/chat",
     "default": "http://localhost:11434/api/chat",
     "qwen2.5:14b": "http://localhost:11434/api/chat",
-    "qwen2.5:32b": "http://100.68.183.36:11434/api/chat",
+    "qwen2.5:32b": "http://100.104.68.115:11434/api/chat",
     "gemma3:12b": "http://localhost:11434/api/chat",
 }
 
@@ -438,6 +440,11 @@ async def startup_event():
     app.include_router(rag_router, prefix="/rag")
     logger.info("RAG router included")
     
+    # Initialize intent classifier
+    intent_classifier = get_intent_classifier()
+    available_intents = intent_classifier.get_available_intents()
+    logger.info(f"Intent classifier loaded with {len(available_intents)} intents: {', '.join(available_intents)}")
+    
     # Integrate the web interface
     integrate_web_interface(app)
     logger.info("Web interface integrated")
@@ -588,7 +595,7 @@ async def search_memories(request: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Query is required")
     
     # Get embedding
-    embedding = text_to_embedding_ollama(query)['embeddings']
+    embedding = get_embeddings(query)['embeddings']
     
     # Search
     results = message_store.vector_search(embedding, k=limit)
@@ -779,86 +786,40 @@ async def periodic_save_history():
         except Exception as e:
             logger.error(f"Error in periodic history save: {str(e)}")
 
-def update_user_profile(user_id, conversation_id):
-    """Update user profile based on conversation"""
+async def classify_intent_and_select_tools(user_query):
+    """
+    Classify the user's intent and select appropriate tools.
+    
+    Args:
+        user_query (str): The user's query
+        
+    Returns:
+        tuple: (prediction_result, selected_tools)
+    """
     try:
-        # Use a consistent identifier for the user profile
-        profile_id = "user_profile"
-        profile_file_path = os.path.join(NOTES_DIRECTORY, "user_profile.json")
+        # Get the intent classifier
+        intent_classifier = get_intent_classifier()
         
-        # Check if profile exists, create if not
-        if not os.path.exists(profile_file_path):
-            # Create the user profile file directly with a fixed filename
-            logger.info("Creating new user profile")
-            
-            # Create note data
-            now = datetime.now().isoformat()
-            note_data = {
-                "title": "User Profile",
-                "content": "Initial user profile.",
-                "tags": ["user_profile"],
-                "created": now,
-                "last_modified": now,
-                "filename": "user_profile.json"
-            }
-            
-            # Write directly to the specified path
-            with open(profile_file_path, 'w') as f:
-                json.dump(note_data, f, indent=2)
+        # Predict intent
+        prediction_result = intent_classifier.predict_intent(user_query)
         
-        # Get messages using the client's built-in method
-        messages = message_store.get_messages_by_conversation(conversation_id)
+        if "error" in prediction_result:
+            logger.error(f"Error predicting intent: {prediction_result['error']}")
+            return prediction_result, None
         
-        logger.info(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
+        # Log the prediction
+        if prediction_result["predictions"]:
+            top_prediction = prediction_result["predictions"][0]
+            logger.info(f"Top intent for query '{user_query}': {top_prediction['intent']} ({top_prediction['percentage']:.2f}%)")
         
-        # Filter to get only user messages
-        user_messages = [msg for msg in messages if msg.get('role') == 'user']
-        logger.info(f"Found {len(user_messages)} user messages from {len(messages)} total messages")
+        # Select tools based on the intent
+        selected_tools = get_tools_for_intent(prediction_result, TOOL_DEFINITIONS)
         
-        # Skip if fewer than required messages
-        if len(user_messages) < 3:  # Changed from 15 to 3 for testing
-            logger.info(f"Not enough messages in current conversation: Only {len(user_messages)} user messages")
-            return None
-            
-        # Prepare prompt to extract user information
-        extract_prompt = "Based on this conversation, what new information did we learn about the user? List any preferences, interests, or personal details mentioned."
-        
-        # Format conversation for the model
-        formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
-        
-        # Make model request
-        extract_messages = [
-            {'role': 'system', 'content': extract_prompt},
-            {'role': 'user', 'content': formatted_convo}
-        ]
-        
-        # Get extraction
-        try:
-            response = asyncio.run(fetch_ollama_response(extract_messages, "llama3.1", stream=False))
-            if 'message' in response and 'content' in response['message']:
-                new_info = response['message']['content']
-                
-                # Read the current profile
-                with open(profile_file_path, 'r') as f:
-                    profile_data = json.load(f)
-                
-                # Update content
-                profile_data['content'] += f"\nUpdated {datetime.now().strftime('%Y-%m-%d')}:\n{new_info}"
-                profile_data['last_modified'] = datetime.now().isoformat()
-                
-                # Write updated profile
-                with open(profile_file_path, 'w') as f:
-                    json.dump(profile_data, f, indent=2)
-                
-                logger.info("Updated user profile with new information")
-                return new_info
-        except Exception as e:
-            logger.error(f"Error in profile extraction: {str(e)}")
-            
-        return None
+        return prediction_result, selected_tools
+    
     except Exception as e:
-        logger.error(f"Error updating user profile: {str(e)}")
-        return None
+        logger.error(f"Error in intent classification: {str(e)}")
+        return {"error": str(e), "predictions": []}, None
 
 def load_system_prompt():
     """Load the system prompt from a file"""
@@ -1059,12 +1020,7 @@ conversation_buffer = ConversationBuffer(max_buffer_size=10)
 
 
 
-async def maybe_summarize_conversation(conversation_id):
-    """Summarize only if the conversation is substantial"""
-    messages = message_store.get_messages_by_conversation(conversation_id)
-    if len(messages) >= 10:  # Only summarize conversations with 10+ messages
-        return await summarize_conversation(conversation_id)
-    return None
+
 
 
 
@@ -1166,7 +1122,7 @@ async def summarize_conversation(conversation_id):
             content=summary,
             conversation_id=f"summary-{conversation_id}",
             date=today,
-            embedding=text_to_embedding_ollama(summary)['embeddings']
+            embedding=get_embeddings(summary)['embeddings']
         )
         
         return summary
@@ -1336,16 +1292,179 @@ async def log_requests(request: Request, call_next):
         logger.error(f"Request failed: {method} {url} - Error: {str(e)}")
         raise
 
+async def handle_request_based_on_intent(messages, model, user_query, prediction_result, stream=True):
+    """
+    Handle the API request differently based on the classified intent.
+    
+    Args:
+        messages (list): The messages to send to the model
+        model (str): The model name
+        user_query (str): The user's query
+        prediction_result (dict): The intent classification result
+        stream (bool): Whether to stream the response
+        
+    Returns:
+        async generator: A generator that yields formatted response chunks
+    """
+    # Map OpenAI model to local model
+    local_model = MODEL_MAPPING.get(model, MODEL_MAPPING["default"])
+    
+    # Get the URL for this model
+    url = MODEL_URLS.get(local_model, MODEL_URLS["default"])
+    
+    # Determine if we should skip tools based on intent
+    skip_tools = False
+    if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
+        top_intent = prediction_result["predictions"][0]["intent"]
+        confidence = prediction_result["predictions"][0]["probability"]
+        
+        # Skip tools for "none" or "thinking" intents or low confidence
+        if top_intent in ["none", "thinking"] or confidence < INTENT_CONFIDENCE_THRESHOLDS.get(top_intent, 0.3):
+            skip_tools = True
+            logger.info(f"Skipping tools for intent '{top_intent}' with confidence {confidence:.4f}")
+
+    async with aiohttp.ClientSession() as session:
+        # Prepare request data
+        data = {
+            'model': local_model,
+            'messages': messages,
+            'stream': True  # Always stream in this function
+        }
+        
+        # Add tools only if not skipping
+        if not skip_tools:
+            # Get selected tools based on intent
+            selected_tools = get_tools_for_intent(prediction_result, TOOL_DEFINITIONS)
+            
+            if selected_tools:
+                logger.info(f"Adding {len(selected_tools)} tools to request based on intent")
+                data['tools'] = selected_tools
+            else:
+                # Use default tools if no specific tools selected
+                logger.info(f"Adding default tools to request")
+                data['tools'] = TOOL_DEFINITIONS
+        else:
+            logger.info("No tools included in request based on intent")
+        
+        logger.info(f"Sending request to {url} with model {local_model}, skip_tools={skip_tools}")
+        
+        try:
+            async with session.post(url, json=data) as response:
+                response.raise_for_status()
+                
+                # For streaming responses
+                full_response = ""
+                async for chunk in response.content:
+                    if not chunk:
+                        continue
+                        
+                    chunk_str = chunk.decode('utf-8').strip()
+                    if not chunk_str:
+                        continue
+                        
+                    try:
+                        response_data = json.loads(chunk_str)
+                        
+                        # Check if this is a tool call and we're not in skip_tools mode
+                        if not skip_tools and 'message' in response_data and 'tool_calls' in response_data['message']:
+                            logger.info(f"Tool call detected in response")
+                            
+                            # Process tool calls
+                            tool_outputs = await process_tool_calls(response_data)
+                            
+                            if tool_outputs:
+                                logger.info(f"Processed tool outputs: {tool_outputs}")
+                                
+                                # Format tool results for system prompt
+                                tool_results = ""
+                                for output in tool_outputs:
+                                    if output.get('role') == 'tool' and 'content' in output:
+                                        tool_name = output.get('name', 'unknown_tool')
+                                        tool_results += f"Tool: {tool_name}\n"
+                                        tool_results += f"Result: {output['content']}\n\n"
+                                
+                                # Create system prompt with tool results
+                                system_prompt = format_tool_system_prompt(
+                                    TOOL_SYSTEM_PROMPT_TEMPLATE,
+                                    user_query,
+                                    tool_results
+                                )
+                                
+                                # Create follow-up messages
+                                follow_up_messages = [
+                                    {'role': 'system', 'content': system_prompt}
+                                ]
+                                
+                                # Send a follow-up request with the tool results
+                                follow_up_data = {
+                                    'model': local_model,
+                                    'messages': follow_up_messages,
+                                    'stream': True
+                                }
+                                
+                                async with session.post(url, json=follow_up_data) as follow_up_response:
+                                    follow_up_response.raise_for_status()
+                                    async for follow_up_chunk in follow_up_response.content:
+                                        if not follow_up_chunk:
+                                            continue
+                                        
+                                        follow_up_str = follow_up_chunk.decode('utf-8').strip()
+                                        if follow_up_str:
+                                            yield format_sse_message(follow_up_str)
+                                            
+                                            # Extract content for full response
+                                            try:
+                                                follow_up_data = json.loads(follow_up_str)
+                                                if 'message' in follow_up_data and 'content' in follow_up_data['message']:
+                                                    full_response += follow_up_data['message']['content']
+                                            except:
+                                                pass
+                            else:
+                                # No tool outputs, just yield the original response
+                                yield format_sse_message(chunk_str)
+                                
+                                # Update full response
+                                if 'message' in response_data and 'content' in response_data['message']:
+                                    full_response += response_data['message']['content']
+                        else:
+                            # Regular message (or we're in skip_tools mode)
+                            yield format_sse_message(chunk_str)
+                            
+                            # Update full response
+                            if 'message' in response_data and 'content' in response_data['message']:
+                                full_response += response_data['message']['content']
+                    except json.JSONDecodeError:
+                        logger.warning(f"JSON decode error for chunk: {chunk_str}")
+                        continue
+                
+                # Add the full response to history
+                if full_response:
+                    add_message_to_history('assistant', full_response)
+                    
+                    # Store in Redis for vector search
+                    if message_store:
+                        try:
+                            embed_and_save(full_response, "primary_conversation", "assistant")
+                        except Exception as e:
+                            logger.error(f"Error storing response in Redis: {str(e)}")
+                
+        except Exception as e:
+            error_msg = f"An error occurred: {str(e)}"
+            logger.error(error_msg)
+            yield format_sse_message(json.dumps({"error": error_msg}))
+
 async def retrieve_relevant_memories(user_query, conversation_id=None, k=5):
-    """Retrieve relevant past conversations based on the user query, excluding recent messages from current conversation"""
     try:
-        # Get embedding for the current query
-        query_embedding = text_to_embedding_ollama(user_query)
+        # Replace this:
+        # query_embedding = text_to_embedding_ollama(user_query)
+        
+        # With this:
+        query_embedding = get_embeddings(user_query)
         
         # Check if vector_search method exists
         if hasattr(message_store, 'vector_search'):
-            # Search for similar past messages
-            similar_messages = message_store.vector_search(query_embedding['embeddings'], k=k+5)  # Get more than needed to allow for filtering
+            # Replace any references to query_embedding['embeddings'] with the same format
+            similar_messages = message_store.vector_search(query_embedding['embeddings'], k=k+5)
             
             # Filter out messages from the current conversation if provided
             filtered_messages = []
@@ -1621,49 +1740,7 @@ TOOL_DEFINITIONS = [
 # Conversation history
 current_chat = []
 
-def get_message_by_key(self, key):
-    """Retrieve a message by key, handling different Redis data types"""
-    try:
-        # Check if key is bytes and decode if needed
-        if isinstance(key, bytes):
-            try:
-                key = key.decode('utf-8')
-            except UnicodeDecodeError:
-                logger.warning(f"Could not decode key: {key}")
-                return None
-                
-        # Check what type the key is
-        key_type = self.message_store.type(key)
-        
-        if key_type == "ReJSON-RL":
-            # It's a JSON object
-            data = self.message_store.json().get(key)
-            return data
-        elif key_type == "hash":
-            # It's a hash - get all fields
-            data = self.message_store.hgetall(key)
-            return data
-        elif key_type == "string":
-            # It's a string - try to parse as JSON
-            try:
-                raw_data = self.message_store.get(key)
-                if isinstance(raw_data, bytes):
-                    raw_data = raw_data.decode('utf-8')
-                return json.loads(raw_data)
-            except:
-                # If can't parse as JSON, return as is
-                if isinstance(raw_data, bytes):
-                    try:
-                        raw_data = raw_data.decode('utf-8')
-                    except UnicodeDecodeError:
-                        # If it's binary data and can't be decoded, return a placeholder
-                        return {"content": "(binary data)", "role": "unknown"}
-                return {"content": raw_data, "role": "unknown"}
-        else:
-            return None
-    except Exception as e:
-        logger.warning(f"Error retrieving message {key}: {e}")
-        return 
+
 
 
 # File operations
@@ -1678,10 +1755,41 @@ def write_to_file(role, content, dates):
         f.write(content + "\n")
 
 # Embedding operations
-def text_to_embedding_ollama(text):
-    model_name = "bge-m3"
-    response = ollama.embed(model=model_name, input=text)
-    return response
+def get_embeddings(text, model_name="bge-m3"):
+    """
+    Generate embeddings for a text using Ollama models.
+    
+    Args:
+        text (str): The text to generate embeddings for
+        model_name (str): The name of the embedding model to use
+        
+    Returns:
+        dict: A dictionary containing the embedding vectors and metadata
+        
+    Example:
+        result = get_embeddings("This is a sample text")
+        embeddings = result['embeddings']
+    """
+    try:
+        if not text or not isinstance(text, str):
+            logger.warning(f"Invalid text provided for embedding: {type(text)}")
+            return {"embeddings": [], "error": "Invalid input text"}
+        
+        # Clean/prepare text if needed
+        cleaned_text = text.strip()
+        
+        # Generate embeddings using Ollama
+        response = ollama.embed(model=model_name, input=cleaned_text)
+        
+        # Log success if debug logging is enabled
+        if logger.isEnabledFor(logging.DEBUG):
+            embedding_length = len(response.get('embedding', [])) 
+            logger.debug(f"Generated embedding with {embedding_length} dimensions")
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error generating embeddings: {str(e)}")
+        return {"embeddings": [], "error": str(e)}
 
 def query_vector_database(query_vectors, k=3):
     try:
@@ -1700,8 +1808,13 @@ def embed_and_save(content, conversation_id, role="assistant"):
     today = datetime.now()
     
     try:
-        embeddings = text_to_embedding_ollama(content)
-        embedding = embeddings.get('embeddings')
+        # Replace this:
+        # embeddings = text_to_embedding_ollama(content)
+        # embedding = embeddings.get('embeddings')
+        
+        # With this:
+        embedding_result = get_embeddings(content)
+        embedding = embedding_result.get('embeddings')
         
         if embedding:
             # Store in Redis
@@ -2201,14 +2314,13 @@ class EmbeddingRequest(BaseModel):
 
 
 
-# OpenAI API Compatible Endpoints
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     # Extract request parameters
     client_messages = request.messages.copy()
     model = request.model
     stream = request.stream
-    tools = request.tools or TOOL_DEFINITIONS
+    user_provided_tools = request.tools
     
     # Extract latest user message
     latest_user_message = None
@@ -2220,61 +2332,105 @@ async def chat_completions(request: ChatCompletionRequest):
     if not latest_user_message:
         raise HTTPException(status_code=400, detail="No user message found in request")
     
-    # Add user message to history
-    add_message_to_history('user', latest_user_message['content'])
+    user_query = latest_user_message['content']
     
-    # Get messages for model - using the fixed version that properly handles token stats
+    # Add user message to history
+    add_message_to_history('user', user_query)
+    
+    # Classify intent
+    prediction_result, _ = await classify_intent_and_select_tools(user_query)
+    
+    # Log the intent classification result
+    if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
+        top_prediction = prediction_result["predictions"][0]
+        logger.info(f"Classified intent: {top_prediction['intent']} with confidence {top_prediction['probability']:.4f}")
+    
+    # Get messages for model
     messages, token_stats = get_messages_with_system_prompt()
     
-    logger.info(f"Sending {len(messages)} messages to model")
-    
-    # Store in Redis for vector search functionality
+    # Store user query in Redis for vector search
     if message_store:
         try:
-            embed_and_save(latest_user_message['content'], "primary_conversation", "user")
+            embed_and_save(user_query, "primary_conversation", "user")
         except Exception as e:
             logger.error(f"Error storing message in Redis: {str(e)}")
     
     # Handle streaming response
     if stream:
-        async def stream_response():
-            full_response = ""
-            # Use the existing send_to_ollama_api function which was working correctly
-            async for chunk in send_to_ollama_api(messages, model, tools, stream=True):
-                yield chunk
-                
-                # Extract content for saving
-                try:
-                    chunk_data = json.loads(chunk.replace("data: ", "").strip())
-                    if 'choices' in chunk_data and chunk_data['choices'] and 'delta' in chunk_data['choices'][0]:
-                        delta = chunk_data['choices'][0]['delta']
-                        if 'content' in delta and delta['content']:
-                            full_response += delta['content']
-                except Exception as e:
-                    # Just log the error and continue
-                    logger.debug(f"Error extracting content from chunk: {str(e)}")
-                    pass
-            
-            # Add assistant response to history
-            if full_response:
-                add_message_to_history('assistant', full_response)
-                
-                # Also store in Redis for vector search
-                if message_store:
-                    try:
-                        embed_and_save(full_response, "primary_conversation", "assistant")
-                    except Exception as e:
-                        logger.error(f"Error storing response in Redis: {str(e)}")
-        
+        # Use the intent-based handler for streaming responses
         return StreamingResponse(
-            stream_response(),
+            handle_request_based_on_intent(messages, model, user_query, prediction_result, stream=True),
             media_type="text/event-stream"
         )
     else:
-        # Non-streaming implementation
+        # For non-streaming requests
         try:
+            # Determine if we should skip tools based on intent
+            skip_tools = False
+            if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
+                top_intent = prediction_result["predictions"][0]["intent"]
+                confidence = prediction_result["predictions"][0]["probability"]
+                
+                # Skip tools for "none" or "thinking" intents or low confidence
+                if top_intent in ["none", "thinking"] or confidence < INTENT_CONFIDENCE_THRESHOLDS.get(top_intent, 0.3):
+                    skip_tools = True
+                    logger.info(f"Skipping tools for intent '{top_intent}' with confidence {confidence:.4f}")
+            
+            # Use user-provided tools if specified, otherwise use intent-based tools
+            tools = None
+            if not skip_tools:
+                if user_provided_tools is not None:
+                    tools = user_provided_tools
+                else:
+                    # Get tools based on intent
+                    tools = get_tools_for_intent(prediction_result, TOOL_DEFINITIONS)
+                    if not tools:
+                        tools = TOOL_DEFINITIONS
+            
+            # Log what we're doing
+            if skip_tools:
+                logger.info(f"Sending request without tools due to intent classification")
+            else:
+                logger.info(f"Sending request with {len(tools) if tools else 0} tools")
+            
+            # Send request
             response = await fetch_ollama_response(messages, model, tools)
             
+            # Process tool calls if present and tools were not skipped
+            if not skip_tools and 'message' in response and 'tool_calls' in response['message']:
+                logger.info("Processing tool calls in non-streaming response")
+                
+                # Process tool calls
+                tool_outputs = await process_tool_calls(response)
+                
+                if tool_outputs:
+                    # Format tool results
+                    tool_results = ""
+                    for output in tool_outputs:
+                        if output.get('role') == 'tool' and 'content' in output:
+                            tool_name = output.get('name', 'unknown_tool')
+                            tool_results += f"Tool: {tool_name}\n"
+                            tool_results += f"Result: {output['content']}\n\n"
+                    
+                    # Create system prompt with tool results
+                    system_prompt = format_tool_system_prompt(
+                        TOOL_SYSTEM_PROMPT_TEMPLATE,
+                        user_query,
+                        tool_results
+                    )
+                    
+                    # Create follow-up messages
+                    follow_up_messages = [
+                        {'role': 'system', 'content': system_prompt}
+                    ]
+                    
+                    # Send follow-up request with tool results
+                    follow_up_response = await fetch_ollama_response(follow_up_messages, model, None)
+                    
+                    # Use this as our final response
+                    response = follow_up_response
+            
+            # Extract content from response
             assistant_content = ""
             if 'message' in response and 'content' in response['message']:
                 assistant_content = response['message']['content']
@@ -2320,7 +2476,7 @@ async def create_embeddings(request: EmbeddingRequest):
         
         embeddings_list = []
         for i, text in enumerate(input_texts):
-            embedding_result = text_to_embedding_ollama(text)
+            embedding_result = get_embeddings(text)
             embeddings_list.append({
                 "object": "embedding",
                 "index": i,
@@ -2394,14 +2550,23 @@ async def receive_chat_message(data: dict = Body(...)):
         if message_store:
             embed_and_save(msg_content, "primary_conversation", "user")
         
+        # Classify intent
+        prediction_result, _ = await classify_intent_and_select_tools(msg_content)
+        
+        # Log the intent classification result
+        if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
+            top_prediction = prediction_result["predictions"][0]
+            logger.info(f"Legacy API - classified intent: {top_prediction['intent']} with confidence {top_prediction['probability']:.4f}")
+        
         # Get messages for model
         messages = get_messages_with_system_prompt()
         
         logger.info(f"Sending {len(messages)} messages to model in legacy endpoint")
 
         async def stream_response():
+            # Use the intent-based handler
             full_response = ""
-            async for chunk in send_to_ollama_api(messages, model, TOOL_DEFINITIONS, stream=True):
+            async for chunk in handle_request_based_on_intent(messages, model, msg_content, prediction_result, stream=True):
                 yield chunk
                 
                 # Extract content for saving
@@ -2414,16 +2579,8 @@ async def receive_chat_message(data: dict = Body(...)):
                 except Exception as e:
                     pass
             
-            # Add assistant response to history
-            if full_response:
-                add_message_to_history('assistant', full_response)
-                
-                # Optionally store in Redis for vector search
-                if message_store:
-                    embed_and_save(full_response, "primary_conversation", "assistant")
-                
-                # Return fixed conversation ID in the response
-                yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
+            # Return fixed conversation ID in the response
+            yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
             
         return StreamingResponse(stream_response(), media_type="text/event-stream")
     
@@ -3166,6 +3323,30 @@ async def tts_status():
             return {"status": "error", "message": f"TTS service returned status code {response.status_code}"}
     except Exception as e:
         return {"status": "offline", "message": f"TTS service is unavailable: {str(e)}"}
+
+@app.post("/v1/debug/classify-intent")
+async def debug_classify_intent(request: dict = Body(...)):
+    """Debug endpoint to test intent classification"""
+    query = request.get("query", "")
+    
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    
+    try:
+        # Classify intent
+        prediction_result, selected_tools = await classify_intent_and_select_tools(query)
+        
+        # Format response
+        response = {
+            "query": query,
+            "prediction": prediction_result,
+            "selected_tools": [tool['function']['name'] for tool in selected_tools] if selected_tools else []
+        }
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error in debug intent classification: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error classifying intent: {str(e)}")
 
 @app.get("/health", status_code=200)
 async def health_check():
