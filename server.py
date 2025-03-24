@@ -588,7 +588,7 @@ async def search_memories(request: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Query is required")
     
     # Get embedding
-    embedding = text_to_embedding_ollama(query)['embeddings']
+    embedding = get_embeddings(query)['embeddings']
     
     # Search
     results = message_store.vector_search(embedding, k=limit)
@@ -779,86 +779,6 @@ async def periodic_save_history():
         except Exception as e:
             logger.error(f"Error in periodic history save: {str(e)}")
 
-def update_user_profile(user_id, conversation_id):
-    """Update user profile based on conversation"""
-    try:
-        # Use a consistent identifier for the user profile
-        profile_id = "user_profile"
-        profile_file_path = os.path.join(NOTES_DIRECTORY, "user_profile.json")
-        
-        # Check if profile exists, create if not
-        if not os.path.exists(profile_file_path):
-            # Create the user profile file directly with a fixed filename
-            logger.info("Creating new user profile")
-            
-            # Create note data
-            now = datetime.now().isoformat()
-            note_data = {
-                "title": "User Profile",
-                "content": "Initial user profile.",
-                "tags": ["user_profile"],
-                "created": now,
-                "last_modified": now,
-                "filename": "user_profile.json"
-            }
-            
-            # Write directly to the specified path
-            with open(profile_file_path, 'w') as f:
-                json.dump(note_data, f, indent=2)
-        
-        # Get messages using the client's built-in method
-        messages = message_store.get_messages_by_conversation(conversation_id)
-        
-        logger.info(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
-        
-        # Filter to get only user messages
-        user_messages = [msg for msg in messages if msg.get('role') == 'user']
-        logger.info(f"Found {len(user_messages)} user messages from {len(messages)} total messages")
-        
-        # Skip if fewer than required messages
-        if len(user_messages) < 3:  # Changed from 15 to 3 for testing
-            logger.info(f"Not enough messages in current conversation: Only {len(user_messages)} user messages")
-            return None
-            
-        # Prepare prompt to extract user information
-        extract_prompt = "Based on this conversation, what new information did we learn about the user? List any preferences, interests, or personal details mentioned."
-        
-        # Format conversation for the model
-        formatted_convo = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
-        
-        # Make model request
-        extract_messages = [
-            {'role': 'system', 'content': extract_prompt},
-            {'role': 'user', 'content': formatted_convo}
-        ]
-        
-        # Get extraction
-        try:
-            response = asyncio.run(fetch_ollama_response(extract_messages, "llama3.1", stream=False))
-            if 'message' in response and 'content' in response['message']:
-                new_info = response['message']['content']
-                
-                # Read the current profile
-                with open(profile_file_path, 'r') as f:
-                    profile_data = json.load(f)
-                
-                # Update content
-                profile_data['content'] += f"\nUpdated {datetime.now().strftime('%Y-%m-%d')}:\n{new_info}"
-                profile_data['last_modified'] = datetime.now().isoformat()
-                
-                # Write updated profile
-                with open(profile_file_path, 'w') as f:
-                    json.dump(profile_data, f, indent=2)
-                
-                logger.info("Updated user profile with new information")
-                return new_info
-        except Exception as e:
-            logger.error(f"Error in profile extraction: {str(e)}")
-            
-        return None
-    except Exception as e:
-        logger.error(f"Error updating user profile: {str(e)}")
-        return None
 
 def load_system_prompt():
     """Load the system prompt from a file"""
@@ -1059,12 +979,7 @@ conversation_buffer = ConversationBuffer(max_buffer_size=10)
 
 
 
-async def maybe_summarize_conversation(conversation_id):
-    """Summarize only if the conversation is substantial"""
-    messages = message_store.get_messages_by_conversation(conversation_id)
-    if len(messages) >= 10:  # Only summarize conversations with 10+ messages
-        return await summarize_conversation(conversation_id)
-    return None
+
 
 
 
@@ -1166,7 +1081,7 @@ async def summarize_conversation(conversation_id):
             content=summary,
             conversation_id=f"summary-{conversation_id}",
             date=today,
-            embedding=text_to_embedding_ollama(summary)['embeddings']
+            embedding=get_embeddings(summary)['embeddings']
         )
         
         return summary
@@ -1337,15 +1252,17 @@ async def log_requests(request: Request, call_next):
         raise
 
 async def retrieve_relevant_memories(user_query, conversation_id=None, k=5):
-    """Retrieve relevant past conversations based on the user query, excluding recent messages from current conversation"""
     try:
-        # Get embedding for the current query
-        query_embedding = text_to_embedding_ollama(user_query)
+        # Replace this:
+        # query_embedding = text_to_embedding_ollama(user_query)
+        
+        # With this:
+        query_embedding = get_embeddings(user_query)
         
         # Check if vector_search method exists
         if hasattr(message_store, 'vector_search'):
-            # Search for similar past messages
-            similar_messages = message_store.vector_search(query_embedding['embeddings'], k=k+5)  # Get more than needed to allow for filtering
+            # Replace any references to query_embedding['embeddings'] with the same format
+            similar_messages = message_store.vector_search(query_embedding['embeddings'], k=k+5)
             
             # Filter out messages from the current conversation if provided
             filtered_messages = []
@@ -1621,49 +1538,7 @@ TOOL_DEFINITIONS = [
 # Conversation history
 current_chat = []
 
-def get_message_by_key(self, key):
-    """Retrieve a message by key, handling different Redis data types"""
-    try:
-        # Check if key is bytes and decode if needed
-        if isinstance(key, bytes):
-            try:
-                key = key.decode('utf-8')
-            except UnicodeDecodeError:
-                logger.warning(f"Could not decode key: {key}")
-                return None
-                
-        # Check what type the key is
-        key_type = self.message_store.type(key)
-        
-        if key_type == "ReJSON-RL":
-            # It's a JSON object
-            data = self.message_store.json().get(key)
-            return data
-        elif key_type == "hash":
-            # It's a hash - get all fields
-            data = self.message_store.hgetall(key)
-            return data
-        elif key_type == "string":
-            # It's a string - try to parse as JSON
-            try:
-                raw_data = self.message_store.get(key)
-                if isinstance(raw_data, bytes):
-                    raw_data = raw_data.decode('utf-8')
-                return json.loads(raw_data)
-            except:
-                # If can't parse as JSON, return as is
-                if isinstance(raw_data, bytes):
-                    try:
-                        raw_data = raw_data.decode('utf-8')
-                    except UnicodeDecodeError:
-                        # If it's binary data and can't be decoded, return a placeholder
-                        return {"content": "(binary data)", "role": "unknown"}
-                return {"content": raw_data, "role": "unknown"}
-        else:
-            return None
-    except Exception as e:
-        logger.warning(f"Error retrieving message {key}: {e}")
-        return 
+
 
 
 # File operations
@@ -1678,10 +1553,41 @@ def write_to_file(role, content, dates):
         f.write(content + "\n")
 
 # Embedding operations
-def text_to_embedding_ollama(text):
-    model_name = "bge-m3"
-    response = ollama.embed(model=model_name, input=text)
-    return response
+def get_embeddings(text, model_name="bge-m3"):
+    """
+    Generate embeddings for a text using Ollama models.
+    
+    Args:
+        text (str): The text to generate embeddings for
+        model_name (str): The name of the embedding model to use
+        
+    Returns:
+        dict: A dictionary containing the embedding vectors and metadata
+        
+    Example:
+        result = get_embeddings("This is a sample text")
+        embeddings = result['embeddings']
+    """
+    try:
+        if not text or not isinstance(text, str):
+            logger.warning(f"Invalid text provided for embedding: {type(text)}")
+            return {"embeddings": [], "error": "Invalid input text"}
+        
+        # Clean/prepare text if needed
+        cleaned_text = text.strip()
+        
+        # Generate embeddings using Ollama
+        response = ollama.embed(model=model_name, input=cleaned_text)
+        
+        # Log success if debug logging is enabled
+        if logger.isEnabledFor(logging.DEBUG):
+            embedding_length = len(response.get('embedding', [])) 
+            logger.debug(f"Generated embedding with {embedding_length} dimensions")
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error generating embeddings: {str(e)}")
+        return {"embeddings": [], "error": str(e)}
 
 def query_vector_database(query_vectors, k=3):
     try:
@@ -1700,8 +1606,13 @@ def embed_and_save(content, conversation_id, role="assistant"):
     today = datetime.now()
     
     try:
-        embeddings = text_to_embedding_ollama(content)
-        embedding = embeddings.get('embeddings')
+        # Replace this:
+        # embeddings = text_to_embedding_ollama(content)
+        # embedding = embeddings.get('embeddings')
+        
+        # With this:
+        embedding_result = get_embeddings(content)
+        embedding = embedding_result.get('embeddings')
         
         if embedding:
             # Store in Redis
@@ -2320,7 +2231,7 @@ async def create_embeddings(request: EmbeddingRequest):
         
         embeddings_list = []
         for i, text in enumerate(input_texts):
-            embedding_result = text_to_embedding_ollama(text)
+            embedding_result = get_embeddings(text)
             embeddings_list.append({
                 "object": "embedding",
                 "index": i,
