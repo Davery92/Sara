@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
 from modules.intent_classifier import get_intent_classifier
-from modules.intent_tool_mapping import get_tools_for_intent, INTENT_CONFIDENCE_THRESHOLDS
+from modules.intent_tool_mapping import get_tools_for_intent, INTENT_CONFIDENCE_THRESHOLDS, should_skip_tools_for_intent
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, Response
 import psutil
 from modules.neo4j_connection import check_neo4j_connection
@@ -86,7 +86,13 @@ os.makedirs(NOTES_DIRECTORY, exist_ok=True)
 SKIP_TOOL_FOLLOWUP = True
 
 # Initialize Perplexica client
-perplexica = PerplexicaClient(base_url="http://localhost:3001")
+perplexica = PerplexicaClient(
+    api_url="http://localhost:3000",
+    ollama_base_url="http://localhost:11434/v1",  # Or appropriate value
+    ollama_model="llama3.2:latest",  # Or appropriate value
+    focus_mode="webSearch",
+    optimization_mode="balanced"
+)
 SYSTEM_PROMPT = ""  # Will be loaded during startup
 TOOL_SYSTEM_PROMPT_TEMPLATE = ""  # Will be loaded during startup
 CORE_MEMORY_FILE = "/home/david/Sara/core_memories.txt"
@@ -1313,15 +1319,7 @@ async def handle_request_based_on_intent(messages, model, user_query, prediction
     url = MODEL_URLS.get(local_model, MODEL_URLS["default"])
     
     # Determine if we should skip tools based on intent
-    skip_tools = False
-    if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
-        top_intent = prediction_result["predictions"][0]["intent"]
-        confidence = prediction_result["predictions"][0]["probability"]
-        
-        # Skip tools for "none" or "thinking" intents or low confidence
-        if top_intent in ["none", "thinking"] or confidence < INTENT_CONFIDENCE_THRESHOLDS.get(top_intent, 0.3):
-            skip_tools = True
-            logger.info(f"Skipping tools for intent '{top_intent}' with confidence {confidence:.4f}")
+    skip_tools = should_skip_tools_for_intent(prediction_result)
 
     async with aiohttp.ClientSession() as session:
         # Prepare request data
@@ -1532,7 +1530,19 @@ def search_perplexica(query: str, focus_mode: str = "webSearch", optimization_mo
             focus_mode=focus_mode,
             optimization_mode=optimization_mode
         )
-        return result
+        
+        # Format the response according to the server's expected format
+        # The search method returns a dictionary now, so we need to format it
+        if "message" in result:
+            formatted_response = f"Answer: {result['message']}\n\nSources:\n"
+            if "sources" in result:
+                for source in result["sources"]:
+                    if "metadata" in source:
+                        metadata = source["metadata"]
+                        formatted_response += f"- {metadata.get('title', 'Untitled')}: {metadata.get('url', 'No URL')}\n"
+            return formatted_response
+        else:
+            return str(result)
     except Exception as e:
         return f"Search failed: {str(e)}"
 
@@ -1913,17 +1923,33 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True, user_quer
             'stream': True  # Always stream in this function
         }
         
-        # Always include tools if available
+        # Check if we need to skip tools based on special tools
+        skip_tools = False
         if tools:
+            # Check if the tool list contains either "no_tool_required" or "send_message"
+            for tool in tools:
+                if isinstance(tool, dict) and 'function' in tool:
+                    tool_name = tool['function'].get('name', '')
+                    if tool_name in ['no_tool_required', 'send_message']:
+                        skip_tools = True
+                        logger.info(f"Skipping tools because tool {tool_name} was detected")
+                        break
+                        
+        # Always include tools if available AND we are not skipping tools
+        if tools and not skip_tools:
             logger.info(f"Adding {len(tools)} tools to streaming request")
             data['tools'] = tools
-        else:
-            # Always include default tools for consistent behavior
+        elif not skip_tools:
+            # Always include default tools for consistent behavior unless we're skipping tools
             logger.info(f"Adding default tools to streaming request")
             data['tools'] = TOOL_DEFINITIONS
+        else:
+            logger.info("No tools included in request based on tool type")
+        
         try:
-            # Make sure tools are properly serializable
-            json.dumps(data['tools'])  # This will raise an error if there's an issue
+            # Make sure tools are properly serializable if we have tools
+            if 'tools' in data:
+                json.dumps(data['tools'])  # This will raise an error if there's an issue
         except Exception as e:
             logger.error(f"Error in request data formatting: {str(e)}")
             # Try with simplified tools if there's an error
@@ -2338,7 +2364,20 @@ async def chat_completions(request: ChatCompletionRequest):
     add_message_to_history('user', user_query)
     
     # Classify intent
-    prediction_result, _ = await classify_intent_and_select_tools(user_query)
+    prediction_result, selected_tools = await classify_intent_and_select_tools(user_query)
+    
+    # Check if we should skip tools based on the intent or the selected tools
+    skip_tools = should_skip_tools_for_intent(prediction_result)
+    
+    # Extra check for special tools - if the selected tool is "send_message" or similar
+    if selected_tools:
+        for tool in selected_tools:
+            if isinstance(tool, dict) and 'function' in tool:
+                tool_name = tool['function'].get('name', '')
+                if tool_name in ['send_message', 'no_tool_required']:
+                    skip_tools = True
+                    logger.info(f"Skipping tools because tool {tool_name} was selected")
+                    break
     
     # Log the intent classification result
     if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
@@ -2365,17 +2404,6 @@ async def chat_completions(request: ChatCompletionRequest):
     else:
         # For non-streaming requests
         try:
-            # Determine if we should skip tools based on intent
-            skip_tools = False
-            if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
-                top_intent = prediction_result["predictions"][0]["intent"]
-                confidence = prediction_result["predictions"][0]["probability"]
-                
-                # Skip tools for "none" or "thinking" intents or low confidence
-                if top_intent in ["none", "thinking"] or confidence < INTENT_CONFIDENCE_THRESHOLDS.get(top_intent, 0.3):
-                    skip_tools = True
-                    logger.info(f"Skipping tools for intent '{top_intent}' with confidence {confidence:.4f}")
-            
             # Use user-provided tools if specified, otherwise use intent-based tools
             tools = None
             if not skip_tools:

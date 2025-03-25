@@ -8,6 +8,7 @@ INTENT_TO_TOOL_MAP = {
     "search": ["search_perplexica"],
     "search_perplexica": ["search_perplexica"],
     "remember": ["append_core_memory"],
+    "append_core_memory": ["append_core_memory"],  # Add this line
     "note_create": ["create_note"],
     "note_read": ["read_note"],
     "note_update": ["append_note"],
@@ -23,16 +24,48 @@ INTENT_TO_TOOL_MAP = {
 INTENT_CONFIDENCE_THRESHOLDS = {
     "search": 0.3,
     "remember": 0.5,
-    "note_create": 0.3,
-    "note_read": 0.3,
-    "note_update": 0.3,
+    "note_create": 0.5,
+    "note_read": 0.5,
+    "note_update": 0.5,
     "note_delete": 0.6,  # Higher threshold for destructive actions
-    "note_list": 0.3,
-    "thinking": 0.3,
-    "timer_set": 0.3,
-    "reminder_set": 0.3,
-    "none": 0.3,  # Default threshold
+    "note_list": 0.5,
+    "thinking": 0.5,
+    "timer_set": 0.5,
+    "reminder_set": 0.5,
+    "none": 0.5,  # Default threshold
 }
+
+# Add this function to intent_tool_mapping.py:
+def should_skip_tools_for_intent(prediction_result):
+    """
+    Determine if tools should be skipped based on the intent prediction.
+    
+    Args:
+        prediction_result (dict): The prediction result from intent classifier
+        
+    Returns:
+        bool: True if tools should be skipped, False otherwise
+    """
+    if not prediction_result or "predictions" not in prediction_result or not prediction_result["predictions"]:
+        return True
+        
+    # Get the top prediction
+    top_prediction = prediction_result["predictions"][0]
+    top_intent = top_prediction["intent"]
+    confidence = top_prediction["probability"]
+    
+    # Always skip tools for certain intent types, regardless of confidence
+    if top_intent in ["none", "thinking", "send_message", "no_tool_required"]:
+        logger.info(f"Skipping tools for intent type '{top_intent}'")
+        return True
+        
+    # Check against the confidence threshold
+    threshold = INTENT_CONFIDENCE_THRESHOLDS.get(top_intent, INTENT_CONFIDENCE_THRESHOLDS["none"])
+    if confidence < threshold:
+        logger.info(f"Skipping tools for intent '{top_intent}' with confidence {confidence:.4f} (below threshold {threshold})")
+        return True
+        
+    return False
 
 def get_tools_for_intent(prediction_result, all_tools):
     """
