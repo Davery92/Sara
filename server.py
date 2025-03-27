@@ -34,6 +34,9 @@ from modules.rag_integration import integrate_rag_with_server, update_system_pro
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
+from modules.intent_classifier import get_intent_classifier
+from modules.intent_tool_mapping import get_tools_for_intent, INTENT_CONFIDENCE_THRESHOLDS, should_skip_tools_for_intent
+from modules.searxng_module import briefing_handler
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, Response
 import psutil
 from modules.neo4j_connection import check_neo4j_connection
@@ -78,13 +81,22 @@ tts_client = OpenAI(
     api_key="not-needed"
 )
 
-
+briefing_router = APIRouter()
+briefings_router = APIRouter()
+logger = logging.getLogger("briefing-router")
+BRIEFINGS_DIRECTORY = "/home/david/Sara/briefings"
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
 SKIP_TOOL_FOLLOWUP = True
 
 # Initialize Perplexica client
-perplexica = PerplexicaClient(base_url="http://localhost:3001")
+perplexica = PerplexicaClient(
+    api_url="http://localhost:3000",
+    ollama_base_url="http://localhost:11434/v1",  # Or appropriate value
+    ollama_model="llama3.2:latest",  # Or appropriate value
+    focus_mode="webSearch",
+    optimization_mode="balanced"
+)
 SYSTEM_PROMPT = ""  # Will be loaded during startup
 TOOL_SYSTEM_PROMPT_TEMPLATE = ""  # Will be loaded during startup
 CORE_MEMORY_FILE = "/home/david/Sara/core_memories.txt"
@@ -113,14 +125,14 @@ AVAILABLE_MODELS = [
 
 # URLs for different models
 MODEL_URLS = {
-    "llama3.3": "http://100.82.117.46:11434/api/chat",
+    "llama3.3": "http://100.104.68.115:11434/api/chat",
     "llama3.2": "http://localhost:11434/api/chat",
     "llama3.1": "http://localhost:11434/api/chat",
     "gemma3:27b": "http://localhost:11434/api/chat",
     "command-r7b": "http://localhost:11434/api/chat",
     "default": "http://localhost:11434/api/chat",
     "qwen2.5:14b": "http://localhost:11434/api/chat",
-    "qwen2.5:32b": "http://100.68.183.36:11434/api/chat",
+    "qwen2.5:32b": "http://100.104.68.115:11434/api/chat",
     "gemma3:12b": "http://localhost:11434/api/chat",
 }
 
@@ -420,6 +432,29 @@ def load_conversation_history():
     MESSAGE_HISTORY = []
     return False
 
+def integrate_briefing_with_server(app):
+    """Integrate the SearXNG briefing handler with the server"""
+    
+    # Include the briefing router
+    app.include_router(briefing_router, prefix="/v1/briefing")
+    
+    # Add the message processor to handle /briefing commands
+    logger.info("SearXNG briefing module integrated with server")
+
+def integrate_briefings_with_server(app):
+    """Integrate the briefings router with the server"""
+    # Make sure we're using the global briefings_router
+    global briefings_router
+    
+    # Include the router with explicit prefix
+    app.include_router(
+        briefings_router, 
+        prefix="/v1/briefings", 
+        tags=["briefings"]
+    )
+    
+    logger.info("Briefings module integrated with server")
+
 @app.on_event("startup")
 async def startup_event():
     """Log when the server starts up and check database connections"""
@@ -437,6 +472,11 @@ async def startup_event():
     # Include the RAG router
     app.include_router(rag_router, prefix="/rag")
     logger.info("RAG router included")
+    
+    # Initialize intent classifier
+    intent_classifier = get_intent_classifier()
+    available_intents = intent_classifier.get_available_intents()
+    logger.info(f"Intent classifier loaded with {len(available_intents)} intents: {', '.join(available_intents)}")
     
     # Integrate the web interface
     integrate_web_interface(app)
@@ -477,6 +517,11 @@ async def startup_event():
     integrate_timer_reminder_tools(app, AVAILABLE_TOOLS, TOOL_DEFINITIONS)
     logger.info("Timer and reminder module integrated with server")
     
+    integrate_briefing_with_server(app)
+    logger.info("Briefing module integrated with server")
+    integrate_briefings_with_server(app)
+    logger.info("Briefings module integrated with server")
+
     logger.info("Server ready to accept connections")
     logger.info("=" * 50)
 
@@ -779,6 +824,43 @@ async def periodic_save_history():
         except Exception as e:
             logger.error(f"Error in periodic history save: {str(e)}")
 
+<<<<<<< HEAD
+=======
+async def classify_intent_and_select_tools(user_query):
+    """
+    Classify the user's intent and select appropriate tools.
+    
+    Args:
+        user_query (str): The user's query
+        
+    Returns:
+        tuple: (prediction_result, selected_tools)
+    """
+    try:
+        # Get the intent classifier
+        intent_classifier = get_intent_classifier()
+        
+        # Predict intent
+        prediction_result = intent_classifier.predict_intent(user_query)
+        
+        if "error" in prediction_result:
+            logger.error(f"Error predicting intent: {prediction_result['error']}")
+            return prediction_result, None
+        
+        # Log the prediction
+        if prediction_result["predictions"]:
+            top_prediction = prediction_result["predictions"][0]
+            logger.info(f"Top intent for query '{user_query}': {top_prediction['intent']} ({top_prediction['percentage']:.2f}%)")
+        
+        # Select tools based on the intent
+        selected_tools = get_tools_for_intent(prediction_result, TOOL_DEFINITIONS)
+        
+        return prediction_result, selected_tools
+    
+    except Exception as e:
+        logger.error(f"Error in intent classification: {str(e)}")
+        return {"error": str(e), "predictions": []}, None
+>>>>>>> develop
 
 def load_system_prompt():
     """Load the system prompt from a file"""
@@ -1251,6 +1333,159 @@ async def log_requests(request: Request, call_next):
         logger.error(f"Request failed: {method} {url} - Error: {str(e)}")
         raise
 
+async def handle_request_based_on_intent(messages, model, user_query, prediction_result, stream=True):
+    """
+    Handle the API request differently based on the classified intent.
+    
+    Args:
+        messages (list): The messages to send to the model
+        model (str): The model name
+        user_query (str): The user's query
+        prediction_result (dict): The intent classification result
+        stream (bool): Whether to stream the response
+        
+    Returns:
+        async generator: A generator that yields formatted response chunks
+    """
+    # Map OpenAI model to local model
+    local_model = MODEL_MAPPING.get(model, MODEL_MAPPING["default"])
+    
+    # Get the URL for this model
+    url = MODEL_URLS.get(local_model, MODEL_URLS["default"])
+    
+    # Determine if we should skip tools based on intent
+    skip_tools = should_skip_tools_for_intent(prediction_result)
+
+    async with aiohttp.ClientSession() as session:
+        # Prepare request data
+        data = {
+            'model': local_model,
+            'messages': messages,
+            'stream': True  # Always stream in this function
+        }
+        
+        # Add tools only if not skipping
+        if not skip_tools:
+            # Get selected tools based on intent
+            selected_tools = get_tools_for_intent(prediction_result, TOOL_DEFINITIONS)
+            
+            if selected_tools:
+                logger.info(f"Adding {len(selected_tools)} tools to request based on intent")
+                data['tools'] = selected_tools
+            else:
+                # Use default tools if no specific tools selected
+                logger.info(f"Adding default tools to request")
+                data['tools'] = TOOL_DEFINITIONS
+        else:
+            logger.info("No tools included in request based on intent")
+        
+        logger.info(f"Sending request to {url} with model {local_model}, skip_tools={skip_tools}")
+        
+        try:
+            async with session.post(url, json=data) as response:
+                response.raise_for_status()
+                
+                # For streaming responses
+                full_response = ""
+                async for chunk in response.content:
+                    if not chunk:
+                        continue
+                        
+                    chunk_str = chunk.decode('utf-8').strip()
+                    if not chunk_str:
+                        continue
+                        
+                    try:
+                        response_data = json.loads(chunk_str)
+                        
+                        # Check if this is a tool call and we're not in skip_tools mode
+                        if not skip_tools and 'message' in response_data and 'tool_calls' in response_data['message']:
+                            logger.info(f"Tool call detected in response")
+                            
+                            # Process tool calls
+                            tool_outputs = await process_tool_calls(response_data)
+                            
+                            if tool_outputs:
+                                logger.info(f"Processed tool outputs: {tool_outputs}")
+                                
+                                # Format tool results for system prompt
+                                tool_results = ""
+                                for output in tool_outputs:
+                                    if output.get('role') == 'tool' and 'content' in output:
+                                        tool_name = output.get('name', 'unknown_tool')
+                                        tool_results += f"Tool: {tool_name}\n"
+                                        tool_results += f"Result: {output['content']}\n\n"
+                                
+                                # Create system prompt with tool results
+                                system_prompt = format_tool_system_prompt(
+                                    TOOL_SYSTEM_PROMPT_TEMPLATE,
+                                    user_query,
+                                    tool_results
+                                )
+                                
+                                # Create follow-up messages
+                                follow_up_messages = [
+                                    {'role': 'system', 'content': system_prompt}
+                                ]
+                                
+                                # Send a follow-up request with the tool results
+                                follow_up_data = {
+                                    'model': local_model,
+                                    'messages': follow_up_messages,
+                                    'stream': True
+                                }
+                                
+                                async with session.post(url, json=follow_up_data) as follow_up_response:
+                                    follow_up_response.raise_for_status()
+                                    async for follow_up_chunk in follow_up_response.content:
+                                        if not follow_up_chunk:
+                                            continue
+                                        
+                                        follow_up_str = follow_up_chunk.decode('utf-8').strip()
+                                        if follow_up_str:
+                                            yield format_sse_message(follow_up_str)
+                                            
+                                            # Extract content for full response
+                                            try:
+                                                follow_up_data = json.loads(follow_up_str)
+                                                if 'message' in follow_up_data and 'content' in follow_up_data['message']:
+                                                    full_response += follow_up_data['message']['content']
+                                            except:
+                                                pass
+                            else:
+                                # No tool outputs, just yield the original response
+                                yield format_sse_message(chunk_str)
+                                
+                                # Update full response
+                                if 'message' in response_data and 'content' in response_data['message']:
+                                    full_response += response_data['message']['content']
+                        else:
+                            # Regular message (or we're in skip_tools mode)
+                            yield format_sse_message(chunk_str)
+                            
+                            # Update full response
+                            if 'message' in response_data and 'content' in response_data['message']:
+                                full_response += response_data['message']['content']
+                    except json.JSONDecodeError:
+                        logger.warning(f"JSON decode error for chunk: {chunk_str}")
+                        continue
+                
+                # Add the full response to history
+                if full_response:
+                    add_message_to_history('assistant', full_response)
+                    
+                    # Store in Redis for vector search
+                    if message_store:
+                        try:
+                            embed_and_save(full_response, "primary_conversation", "assistant")
+                        except Exception as e:
+                            logger.error(f"Error storing response in Redis: {str(e)}")
+                
+        except Exception as e:
+            error_msg = f"An error occurred: {str(e)}"
+            logger.error(error_msg)
+            yield format_sse_message(json.dumps({"error": error_msg}))
+
 async def retrieve_relevant_memories(user_query, conversation_id=None, k=5):
     try:
         # Replace this:
@@ -1330,7 +1565,19 @@ def search_perplexica(query: str, focus_mode: str = "webSearch", optimization_mo
             focus_mode=focus_mode,
             optimization_mode=optimization_mode
         )
-        return result
+        
+        # Format the response according to the server's expected format
+        # The search method returns a dictionary now, so we need to format it
+        if "message" in result:
+            formatted_response = f"Answer: {result['message']}\n\nSources:\n"
+            if "sources" in result:
+                for source in result["sources"]:
+                    if "metadata" in source:
+                        metadata = source["metadata"]
+                        formatted_response += f"- {metadata.get('title', 'Untitled')}: {metadata.get('url', 'No URL')}\n"
+            return formatted_response
+        else:
+            return str(result)
     except Exception as e:
         return f"Search failed: {str(e)}"
 
@@ -1711,17 +1958,33 @@ async def send_to_ollama_api(messages, model, tools=None, stream=True, user_quer
             'stream': True  # Always stream in this function
         }
         
-        # Always include tools if available
+        # Check if we need to skip tools based on special tools
+        skip_tools = False
         if tools:
+            # Check if the tool list contains either "no_tool_required" or "send_message"
+            for tool in tools:
+                if isinstance(tool, dict) and 'function' in tool:
+                    tool_name = tool['function'].get('name', '')
+                    if tool_name in ['no_tool_required', 'send_message']:
+                        skip_tools = True
+                        logger.info(f"Skipping tools because tool {tool_name} was detected")
+                        break
+                        
+        # Always include tools if available AND we are not skipping tools
+        if tools and not skip_tools:
             logger.info(f"Adding {len(tools)} tools to streaming request")
             data['tools'] = tools
-        else:
-            # Always include default tools for consistent behavior
+        elif not skip_tools:
+            # Always include default tools for consistent behavior unless we're skipping tools
             logger.info(f"Adding default tools to streaming request")
             data['tools'] = TOOL_DEFINITIONS
+        else:
+            logger.info("No tools included in request based on tool type")
+        
         try:
-            # Make sure tools are properly serializable
-            json.dumps(data['tools'])  # This will raise an error if there's an issue
+            # Make sure tools are properly serializable if we have tools
+            if 'tools' in data:
+                json.dumps(data['tools'])  # This will raise an error if there's an issue
         except Exception as e:
             logger.error(f"Error in request data formatting: {str(e)}")
             # Try with simplified tools if there's an error
@@ -1920,6 +2183,80 @@ def manage_conversation_window(conversation_id, max_history=60):
         logger.error(f"Error retrieving conversation window: {str(e)}")
         return []
 
+async def handle_show_briefing_request(user_message):
+    """
+    Handle requests to show a briefing
+    
+    Args:
+        user_message (str): The user's message
+        
+    Returns:
+        tuple: (is_show_request, response_message)
+    """
+    message = user_message.lower().strip()
+    
+    # Check if this is a request to show a briefing
+    show_briefing_patterns = [
+        "show the briefing", 
+        "show briefing", 
+        "display the briefing", 
+        "view the briefing",
+        "see the briefing", 
+        "read the briefing", 
+        "get the briefing",
+        "show me the briefing",
+        "can i see the briefing"
+    ]
+    
+    is_show_request = any(pattern in message for pattern in show_briefing_patterns)
+    
+    if is_show_request:
+        from modules.searxng_module import briefing_handler
+        
+        # Get the latest briefing
+        latest_briefing = briefing_handler.get_latest_briefing()
+        
+        if latest_briefing.get("status") == "not_found":
+            return (True, "I don't have any completed briefings to show you yet.")
+        
+        if "briefing" in latest_briefing:
+            # We have the briefing content
+            query = latest_briefing.get("query", "your search")
+            briefing_text = latest_briefing.get("briefing", "")
+            
+            # Create a response that includes the briefing
+            response = f"Here is your briefing on '{query}':\n\n{briefing_text}"
+            return (True, response)
+        elif "briefing_path" in latest_briefing:
+            # We have a path to the briefing file
+            try:
+                query = latest_briefing.get("query", "your search")
+                file_path = latest_briefing.get("briefing_path")
+                
+                # Read the file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    briefing_text = f.read()
+                
+                # Create a response that includes the briefing
+                response = f"Here is your briefing on '{query}':\n\n{briefing_text}"
+                return (True, response)
+            except Exception as e:
+                logger.error(f"Error reading briefing file: {e}")
+                return (True, f"I found a briefing on '{query}', but had trouble reading the file: {str(e)}")
+        else:
+            # We have a record but no content
+            query = latest_briefing.get("query", "your search")
+            status = latest_briefing.get("status", "unknown")
+            
+            if status == "error":
+                error = latest_briefing.get("error", "an unknown error")
+                return (True, f"I tried to create a briefing on '{query}', but encountered an error: {error}")
+            else:
+                return (True, f"I found a record of a briefing on '{query}', but couldn't retrieve the content.")
+    
+    # Not a show briefing request
+    return (False, None)
+
 def format_sse_message(data):
     """Format a response as a Server-Sent Event message"""
     try:
@@ -2112,14 +2449,15 @@ class EmbeddingRequest(BaseModel):
 
 
 
-# OpenAI API Compatible Endpoints
+# Modifications to the chat_completions endpoint to handle /briefing commands
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     # Extract request parameters
     client_messages = request.messages.copy()
     model = request.model
     stream = request.stream
-    tools = request.tools or TOOL_DEFINITIONS
+    user_provided_tools = request.tools
     
     # Extract latest user message
     latest_user_message = None
@@ -2131,61 +2469,247 @@ async def chat_completions(request: ChatCompletionRequest):
     if not latest_user_message:
         raise HTTPException(status_code=400, detail="No user message found in request")
     
-    # Add user message to history
-    add_message_to_history('user', latest_user_message['content'])
+    user_query = latest_user_message['content']
     
-    # Get messages for model - using the fixed version that properly handles token stats
+    # Check if this is a /briefing command
+    from modules.searxng_module import briefing_handler
+    is_briefing, briefing_response, task_info = await handle_possible_briefing_command(user_query, "primary_conversation")
+    
+    if is_briefing:
+        # It's a briefing command, so return a direct response
+        logger.info(f"Processed /briefing command: {task_info}")
+        
+        # Add the command and response to history
+        add_message_to_history('user', user_query)
+        add_message_to_history('assistant', briefing_response)
+        
+        # Store in Redis for vector search if available
+        if message_store:
+            try:
+                embed_and_save(user_query, "primary_conversation", "user")
+                embed_and_save(briefing_response, "primary_conversation", "assistant")
+            except Exception as e:
+                logger.error(f"Error storing message in Redis: {str(e)}")
+                
+        # Format OpenAI response
+        openai_response = {
+            "id": f"chatcmpl-{str(uuid4())}",
+            "object": "chat.completion",
+            "created": int(datetime.now().timestamp()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": briefing_response
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(user_query) // 4,  # Rough estimate
+                "completion_tokens": len(briefing_response) // 4,  # Rough estimate
+                "total_tokens": (len(user_query) + len(briefing_response)) // 4  # Rough estimate
+            }
+        }
+        
+        # Check if streaming is requested
+        if stream:
+            async def stream_briefing_response():
+                # Return the briefing response in a chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": briefing_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                
+            return StreamingResponse(stream_briefing_response(), media_type="text/event-stream")
+        else:
+            return JSONResponse(content=openai_response)
+    
+    # Check if this is a request to show a briefing
+    is_show_request, show_response = await handle_show_briefing_request(user_query)
+    
+    if is_show_request:
+        # It's a request to show a briefing
+        logger.info("Processed show briefing request")
+        
+        # Add the user query and response to history
+        add_message_to_history('user', user_query)
+        add_message_to_history('assistant', show_response)
+        
+        # Store in Redis for vector search if available
+        if message_store:
+            try:
+                embed_and_save(user_query, "primary_conversation", "user")
+                embed_and_save(show_response, "primary_conversation", "assistant")
+            except Exception as e:
+                logger.error(f"Error storing message in Redis: {str(e)}")
+                
+        # Format OpenAI response
+        openai_response = {
+            "id": f"chatcmpl-{str(uuid4())}",
+            "object": "chat.completion",
+            "created": int(datetime.now().timestamp()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": show_response
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(user_query) // 4,  # Rough estimate
+                "completion_tokens": len(show_response) // 4,  # Rough estimate
+                "total_tokens": (len(user_query) + len(show_response)) // 4  # Rough estimate
+            }
+        }
+        
+        # Check if streaming is requested
+        if stream:
+            async def stream_show_response():
+                # Return the show response in a chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": show_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                
+            return StreamingResponse(stream_show_response(), media_type="text/event-stream")
+        else:
+            return JSONResponse(content=openai_response)
+    
+    # Not a briefing command or show request, continue with normal processing
+    # Add user message to history
+    add_message_to_history('user', user_query)
+    
+    # Classify intent
+    prediction_result, selected_tools = await classify_intent_and_select_tools(user_query)
+    
+    # Check if we should skip tools based on the intent or the selected tools
+    skip_tools = should_skip_tools_for_intent(prediction_result)
+    
+    # Extra check for special tools - if the selected tool is "send_message" or similar
+    if selected_tools:
+        for tool in selected_tools:
+            if isinstance(tool, dict) and 'function' in tool:
+                tool_name = tool['function'].get('name', '')
+                if tool_name in ['send_message', 'no_tool_required']:
+                    skip_tools = True
+                    logger.info(f"Skipping tools because tool {tool_name} was selected")
+                    break
+    
+    # Log the intent classification result
+    if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
+        top_prediction = prediction_result["predictions"][0]
+        logger.info(f"Classified intent: {top_prediction['intent']} with confidence {top_prediction['probability']:.4f}")
+    
+    # Get messages for model
     messages, token_stats = get_messages_with_system_prompt()
     
-    logger.info(f"Sending {len(messages)} messages to model")
-    
-    # Store in Redis for vector search functionality
+    # Store user query in Redis for vector search
     if message_store:
         try:
-            embed_and_save(latest_user_message['content'], "primary_conversation", "user")
+            embed_and_save(user_query, "primary_conversation", "user")
         except Exception as e:
             logger.error(f"Error storing message in Redis: {str(e)}")
     
     # Handle streaming response
     if stream:
-        async def stream_response():
-            full_response = ""
-            # Use the existing send_to_ollama_api function which was working correctly
-            async for chunk in send_to_ollama_api(messages, model, tools, stream=True):
-                yield chunk
-                
-                # Extract content for saving
-                try:
-                    chunk_data = json.loads(chunk.replace("data: ", "").strip())
-                    if 'choices' in chunk_data and chunk_data['choices'] and 'delta' in chunk_data['choices'][0]:
-                        delta = chunk_data['choices'][0]['delta']
-                        if 'content' in delta and delta['content']:
-                            full_response += delta['content']
-                except Exception as e:
-                    # Just log the error and continue
-                    logger.debug(f"Error extracting content from chunk: {str(e)}")
-                    pass
-            
-            # Add assistant response to history
-            if full_response:
-                add_message_to_history('assistant', full_response)
-                
-                # Also store in Redis for vector search
-                if message_store:
-                    try:
-                        embed_and_save(full_response, "primary_conversation", "assistant")
-                    except Exception as e:
-                        logger.error(f"Error storing response in Redis: {str(e)}")
-        
+        # Use the intent-based handler for streaming responses
         return StreamingResponse(
-            stream_response(),
+            handle_request_based_on_intent(messages, model, user_query, prediction_result, stream=True),
             media_type="text/event-stream"
         )
     else:
-        # Non-streaming implementation
+        # For non-streaming requests
         try:
+            # Use user-provided tools if specified, otherwise use intent-based tools
+            tools = None
+            if not skip_tools:
+                if user_provided_tools is not None:
+                    tools = user_provided_tools
+                else:
+                    # Get tools based on intent
+                    tools = get_tools_for_intent(prediction_result, TOOL_DEFINITIONS)
+                    if not tools:
+                        tools = TOOL_DEFINITIONS
+            
+            # Log what we're doing
+            if skip_tools:
+                logger.info(f"Sending request without tools due to intent classification")
+            else:
+                logger.info(f"Sending request with {len(tools) if tools else 0} tools")
+            
+            # Send request
             response = await fetch_ollama_response(messages, model, tools)
             
+            # Process tool calls if present and tools were not skipped
+            if not skip_tools and 'message' in response and 'tool_calls' in response['message']:
+                logger.info("Processing tool calls in non-streaming response")
+                
+                # Process tool calls
+                tool_outputs = await process_tool_calls(response)
+                
+                if tool_outputs:
+                    # Format tool results
+                    tool_results = ""
+                    for output in tool_outputs:
+                        if output.get('role') == 'tool' and 'content' in output:
+                            tool_name = output.get('name', 'unknown_tool')
+                            tool_results += f"Tool: {tool_name}\n"
+                            tool_results += f"Result: {output['content']}\n\n"
+                    
+                    # Create system prompt with tool results
+                    system_prompt = format_tool_system_prompt(
+                        TOOL_SYSTEM_PROMPT_TEMPLATE,
+                        user_query,
+                        tool_results
+                    )
+                    
+                    # Create follow-up messages
+                    follow_up_messages = [
+                        {'role': 'system', 'content': system_prompt}
+                    ]
+                    
+                    # Send follow-up request with tool results
+                    follow_up_response = await fetch_ollama_response(follow_up_messages, model, None)
+                    
+                    # Use this as our final response
+                    response = follow_up_response
+            
+            # Extract content from response
             assistant_content = ""
             if 'message' in response and 'content' in response['message']:
                 assistant_content = response['message']['content']
@@ -2298,6 +2822,90 @@ async def receive_chat_message(data: dict = Body(...)):
         
         logger.info(f"Legacy chat API called")
         
+        # Check if this is a /briefing command
+        from modules.searxng_module import briefing_handler
+        is_briefing, briefing_response, task_info = await handle_possible_briefing_command(msg_content, "primary_conversation")
+        
+        if is_briefing:
+            # It's a briefing command, so return a direct response
+            logger.info(f"Processed /briefing command in legacy API: {task_info}")
+            
+            # Add the command and response to history
+            add_message_to_history('user', msg_content)
+            add_message_to_history('assistant', briefing_response)
+            
+            # Optionally store in Redis for vector search
+            if message_store:
+                embed_and_save(msg_content, "primary_conversation", "user")
+                embed_and_save(briefing_response, "primary_conversation", "assistant")
+            
+            # Stream the response in the legacy format
+            async def stream_briefing_response():
+                # Format as OpenAI chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": briefing_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                
+                # Return fixed conversation ID in the response
+                yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
+                
+            return StreamingResponse(stream_briefing_response(), media_type="text/event-stream")
+        
+        # Check if this is a request to show a briefing
+        is_show_request, show_response = await handle_show_briefing_request(msg_content)
+        
+        if is_show_request:
+            # It's a request to show a briefing
+            logger.info("Processed show briefing request in legacy API")
+            
+            # Add the user query and response to history
+            add_message_to_history('user', msg_content)
+            add_message_to_history('assistant', show_response)
+            
+            # Optionally store in Redis for vector search
+            if message_store:
+                embed_and_save(msg_content, "primary_conversation", "user")
+                embed_and_save(show_response, "primary_conversation", "assistant")
+            
+            # Stream the response in the legacy format
+            async def stream_show_response():
+                # Format as OpenAI chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": show_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                
+                # Return fixed conversation ID in the response
+                yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
+                
+            return StreamingResponse(stream_show_response(), media_type="text/event-stream")
+        
+        # Not a briefing command or show request, continue with normal processing
         # Add user message to history
         add_message_to_history('user', msg_content)
         
@@ -2305,14 +2913,23 @@ async def receive_chat_message(data: dict = Body(...)):
         if message_store:
             embed_and_save(msg_content, "primary_conversation", "user")
         
+        # Classify intent
+        prediction_result, _ = await classify_intent_and_select_tools(msg_content)
+        
+        # Log the intent classification result
+        if prediction_result and "predictions" in prediction_result and prediction_result["predictions"]:
+            top_prediction = prediction_result["predictions"][0]
+            logger.info(f"Legacy API - classified intent: {top_prediction['intent']} with confidence {top_prediction['probability']:.4f}")
+        
         # Get messages for model
         messages = get_messages_with_system_prompt()
         
         logger.info(f"Sending {len(messages)} messages to model in legacy endpoint")
 
         async def stream_response():
+            # Use the intent-based handler
             full_response = ""
-            async for chunk in send_to_ollama_api(messages, model, TOOL_DEFINITIONS, stream=True):
+            async for chunk in handle_request_based_on_intent(messages, model, msg_content, prediction_result, stream=True):
                 yield chunk
                 
                 # Extract content for saving
@@ -2325,16 +2942,8 @@ async def receive_chat_message(data: dict = Body(...)):
                 except Exception as e:
                     pass
             
-            # Add assistant response to history
-            if full_response:
-                add_message_to_history('assistant', full_response)
-                
-                # Optionally store in Redis for vector search
-                if message_store:
-                    embed_and_save(full_response, "primary_conversation", "assistant")
-                
-                # Return fixed conversation ID in the response
-                yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
+            # Return fixed conversation ID in the response
+            yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
             
         return StreamingResponse(stream_response(), media_type="text/event-stream")
     
@@ -2440,6 +3049,69 @@ async def some_other_function():
     except Exception as e:
         logger.error(f"Error in some_other_function: {e}")
         raise
+
+async def handle_possible_briefing_command(user_message, conversation_id=None):
+    """
+    Check if a user message is a /briefing command and handle it if so
+    
+    Args:
+        user_message (str): The user's message
+        conversation_id (str): Optional conversation ID
+        
+    Returns:
+        tuple: (is_briefing_command, response_message, task_info)
+    """
+    message = user_message.strip()
+    
+    # Check if this is a briefing command
+    if message.startswith("/briefing "):
+        # Extract the search query
+        query = message[10:].strip()
+        
+        if not query:
+            return (True, "Please provide a search query after /briefing.", None)
+        
+        # Start the briefing task
+        task_info = await briefing_handler.process_briefing_command(query, conversation_id)
+        
+        # Create a response message
+        response = f"I've started collecting information on '{query}'. This process will run in the background, allowing us to continue our conversation. I'll let you know when the briefing is ready."
+        
+        return (True, response, task_info)
+    
+    # Not a briefing command
+    return (False, None, None)
+
+async def check_briefing_completion(task_id, max_wait_time=300):
+    """
+    Check if a briefing task has completed and return the result
+    
+    Args:
+        task_id (str): The ID of the task to check
+        max_wait_time (int): Maximum time to wait in seconds
+        
+    Returns:
+        dict: The briefing result or None if not completed
+    """
+    start_time = asyncio.get_event_loop().time()
+    
+    while (asyncio.get_event_loop().time() - start_time) < max_wait_time:
+        # Check task status
+        status = briefing_handler.get_task_status(task_id)
+        
+        if status.get("status") == "completed":
+            # Task is completed
+            return status
+        
+        if status.get("status") == "error":
+            # Task encountered an error
+            return status
+        
+        # Wait a bit before checking again
+        await asyncio.sleep(5)
+    
+    # Task didn't complete within the time limit
+    return {"status": "timeout", "message": "Briefing task did not complete within the time limit"}
 
 # API Endpoints
 @dashboard_router.get("/v1/notes")
@@ -2866,6 +3538,58 @@ async def get_gpu_usage():
             "error": str(e)
         }
 
+@app.get("/v1/stats/tokens")
+async def get_token_stats():
+    """Get token usage statistics"""
+    try:
+        # First try to get token stats from Redis
+        token_stats_json = None
+        
+        if hasattr(message_store, 'client') and hasattr(message_store.client, 'redis_client'):
+            token_stats_json = message_store.client.redis_client.get("token_stats")
+        elif hasattr(message_store, 'message_store'):
+            token_stats_json = message_store.message_store.get("token_stats")
+        elif hasattr(message_store, 'redis_client'):
+            token_stats_json = message_store.redis_client.get("token_stats")
+        
+        if token_stats_json:
+            if isinstance(token_stats_json, bytes):
+                token_stats_json = token_stats_json.decode('utf-8')
+            
+            try:
+                token_stats = json.loads(token_stats_json)
+                return token_stats
+            except json.JSONDecodeError:
+                logger.error("Error decoding token stats JSON")
+        
+        # If we couldn't get stats from Redis, calculate based on conversation history
+        total_tokens = 0
+        history_tokens = 0
+        
+        # Count tokens in current conversation history
+        for msg in MESSAGE_HISTORY:
+            msg_tokens = count_tokens(msg.get('content', ''))
+            total_tokens += msg_tokens
+            history_tokens += msg_tokens
+        
+        # Add system prompt tokens
+        system_tokens = count_tokens(SYSTEM_PROMPT)
+        total_tokens += system_tokens
+        
+        return {
+            "system_tokens": system_tokens,
+            "history_tokens": history_tokens,
+            "total_tokens": total_tokens
+        }
+    except Exception as e:
+        logger.error(f"Error getting token stats: {str(e)}")
+        # Return default values in case of error
+        return {
+            "system_tokens": 0,
+            "history_tokens": 0,
+            "total_tokens": 0
+        }
+
 @app.post("/v1/clear-conversation")
 async def clear_conversation(request: dict = Body(...)):
     """Clear the conversation history for a specific conversation ID"""
@@ -3077,6 +3801,155 @@ async def tts_status():
             return {"status": "error", "message": f"TTS service returned status code {response.status_code}"}
     except Exception as e:
         return {"status": "offline", "message": f"TTS service is unavailable: {str(e)}"}
+
+@app.post("/v1/debug/classify-intent")
+async def debug_classify_intent(request: dict = Body(...)):
+    """Debug endpoint to test intent classification"""
+    query = request.get("query", "")
+    
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    
+    try:
+        # Classify intent
+        prediction_result, selected_tools = await classify_intent_and_select_tools(query)
+        
+        # Format response
+        response = {
+            "query": query,
+            "prediction": prediction_result,
+            "selected_tools": [tool['function']['name'] for tool in selected_tools] if selected_tools else []
+        }
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error in debug intent classification: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error classifying intent: {str(e)}")
+
+
+@briefing_router.get("/status/{task_id}")
+async def get_briefing_status(task_id: str):
+    """Get the status of a briefing task"""
+    return briefing_handler.get_task_status(task_id)
+
+
+# Endpoint to get the latest briefing
+@briefing_router.get("/latest")
+async def get_latest_briefing(query: str = None):
+    """Get the latest completed briefing"""
+    return briefing_handler.get_latest_briefing(query)
+
+
+# Endpoint to manually start a briefing task
+@briefing_router.post("/search")
+async def start_briefing_search(data: dict):
+    """Start a new briefing search task"""
+    query = data.get("query", "")
+    conversation_id = data.get("conversation_id", None)
+    
+    if not query:
+        return {"status": "error", "message": "Query is required"}
+    
+    result = await briefing_handler.process_briefing_command(query, conversation_id)
+    return result
+
+
+@briefings_router.get("/list")
+async def list_briefings():
+    """List all available briefings from the briefings directory"""
+    try:
+        briefings = []
+        
+        # Get all markdown files in the directory
+        for filename in os.listdir(BRIEFINGS_DIRECTORY):
+            if filename.endswith('.md'):
+                file_path = os.path.join(BRIEFINGS_DIRECTORY, filename)
+                
+                # Get file stats
+                stats = os.stat(file_path)
+                created_time = datetime.fromtimestamp(stats.st_ctime)
+                modified_time = datetime.fromtimestamp(stats.st_mtime)
+                
+                # Extract title from filename (remove date and extension if present)
+                title = filename
+                # Remove extension
+                if title.endswith('.md'):
+                    title = title[:-3]
+                # Try to extract date pattern like 20240326_
+                date_match = re.match(r'^\d{8}_(.+)$', title)
+                if date_match:
+                    title = date_match.group(1)
+                # Replace underscores with spaces
+                title = title.replace('_', ' ')
+                # Title case
+                title = title.title()
+                
+                # Try to extract a better title from first line of the file
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        first_line = f.readline().strip()
+                        if first_line.startswith('# '):
+                            title = first_line[2:]
+                except Exception as e:
+                    logging.warning(f"Could not read first line of {filename}: {e}")
+                
+                # Add to briefings list
+                briefings.append({
+                    "filename": filename,
+                    "title": title,
+                    "path": file_path,
+                    "created": created_time.isoformat(),
+                    "modified": modified_time.isoformat(),
+                    "size": stats.st_size
+                })
+        
+        # Sort by creation time (newest first)
+        briefings.sort(key=lambda x: x["created"], reverse=True)
+        
+        return {"briefings": briefings}
+    except Exception as e:
+        logging.error(f"Error listing briefings: {e}")
+        return {"error": str(e), "briefings": []}
+
+@briefings_router.get("/content/{filename}")
+async def get_briefing_content(filename: str):
+    """Get the content of a specific briefing file"""
+    try:
+        file_path = os.path.join(BRIEFINGS_DIRECTORY, filename)
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            return {"error": f"Briefing file {filename} not found"}
+        
+        # Return the file content
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return {"content": content, "filename": filename}
+    except Exception as e:
+        logging.error(f"Error getting briefing content: {e}")
+        return {"error": str(e)}
+
+@briefings_router.get("/file/{filename}")
+async def get_briefing_file(filename: str):
+    """Return the briefing file directly"""
+    try:
+        file_path = os.path.join(BRIEFINGS_DIRECTORY, filename)
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Briefing file {filename} not found")
+        
+        # Return the file
+        return FileResponse(file_path, media_type="text/markdown")
+    except Exception as e:
+        logging.error(f"Error serving briefing file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add this to the app after defining all routes
+def setup_briefings_routes(app):
+    app.include_router(briefings_router, prefix="/v1/briefings", tags=["briefings"])
+    logging.info("Briefings routes added")
 
 @app.get("/health", status_code=200)
 async def health_check():
