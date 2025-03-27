@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply font-sans bg-bg-color text-text-color h-screen overflow-hidden;
+  }
+}
+
+@layer components {
+  /* Custom component styles can go here */
+  .chat-message {
+    @apply flex py-4 px-12 gap-4 border-b border-border-color w-full;
+  }
+  
+  .chat-message.user {
+    @apply bg-user-bubble;
+  }
+  
+  .chat-message.assistant {
+    @apply bg-assistant-bubble;
+  }
+  
+  .avatar {
+    @apply w-7 h-7 rounded flex items-center justify-center font-bold flex-shrink-0;
+  }
+  
+  .avatar.user {
+    @apply bg-accent-color text-white;
+  }
+  
+  .avatar.assistant {
+    @apply bg-blue-600 text-white;
+  }
+  
+  .message-content {
+    @apply leading-6 text-sm break-words whitespace-pre-wrap flex-1;
+  }
+  
+  .message-content p {
+    @apply mb-4;
+  }
+  
+  .message-content p:last-child {
+    @apply mb-0;
+  }
+  
+  pre {
+    @apply bg-code-bg p-3 rounded overflow-x-auto my-3;
+  }
+  
+  code {
+    @apply font-mono text-sm;
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    @apply opacity-40 scale-75;
+  }
+  50% {
+    @apply opacity-100 scale-100;
+  }
+}
+
+@keyframes audio-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes modal-fade-in {
+  from {
+    @apply opacity-0 -translate-y-5;
+  }
+  to {
+    @apply opacity-100 translate-y-0;
+  }
+}

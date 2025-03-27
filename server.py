@@ -36,6 +36,7 @@ from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
 from modules.intent_classifier import get_intent_classifier
 from modules.intent_tool_mapping import get_tools_for_intent, INTENT_CONFIDENCE_THRESHOLDS, should_skip_tools_for_intent
+from modules.searxng_module import briefing_handler
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse, Response
 import psutil
 from modules.neo4j_connection import check_neo4j_connection
@@ -80,7 +81,10 @@ tts_client = OpenAI(
     api_key="not-needed"
 )
 
-
+briefing_router = APIRouter()
+briefings_router = APIRouter()
+logger = logging.getLogger("briefing-router")
+BRIEFINGS_DIRECTORY = "/home/david/Sara/briefings"
 # Ensure notes directory exists
 os.makedirs(NOTES_DIRECTORY, exist_ok=True)
 SKIP_TOOL_FOLLOWUP = True
@@ -428,6 +432,29 @@ def load_conversation_history():
     MESSAGE_HISTORY = []
     return False
 
+def integrate_briefing_with_server(app):
+    """Integrate the SearXNG briefing handler with the server"""
+    
+    # Include the briefing router
+    app.include_router(briefing_router, prefix="/v1/briefing")
+    
+    # Add the message processor to handle /briefing commands
+    logger.info("SearXNG briefing module integrated with server")
+
+def integrate_briefings_with_server(app):
+    """Integrate the briefings router with the server"""
+    # Make sure we're using the global briefings_router
+    global briefings_router
+    
+    # Include the router with explicit prefix
+    app.include_router(
+        briefings_router, 
+        prefix="/v1/briefings", 
+        tags=["briefings"]
+    )
+    
+    logger.info("Briefings module integrated with server")
+
 @app.on_event("startup")
 async def startup_event():
     """Log when the server starts up and check database connections"""
@@ -490,6 +517,11 @@ async def startup_event():
     integrate_timer_reminder_tools(app, AVAILABLE_TOOLS, TOOL_DEFINITIONS)
     logger.info("Timer and reminder module integrated with server")
     
+    integrate_briefing_with_server(app)
+    logger.info("Briefing module integrated with server")
+    integrate_briefings_with_server(app)
+    logger.info("Briefings module integrated with server")
+
     logger.info("Server ready to accept connections")
     logger.info("=" * 50)
 
@@ -2148,6 +2180,80 @@ def manage_conversation_window(conversation_id, max_history=60):
         logger.error(f"Error retrieving conversation window: {str(e)}")
         return []
 
+async def handle_show_briefing_request(user_message):
+    """
+    Handle requests to show a briefing
+    
+    Args:
+        user_message (str): The user's message
+        
+    Returns:
+        tuple: (is_show_request, response_message)
+    """
+    message = user_message.lower().strip()
+    
+    # Check if this is a request to show a briefing
+    show_briefing_patterns = [
+        "show the briefing", 
+        "show briefing", 
+        "display the briefing", 
+        "view the briefing",
+        "see the briefing", 
+        "read the briefing", 
+        "get the briefing",
+        "show me the briefing",
+        "can i see the briefing"
+    ]
+    
+    is_show_request = any(pattern in message for pattern in show_briefing_patterns)
+    
+    if is_show_request:
+        from modules.searxng_module import briefing_handler
+        
+        # Get the latest briefing
+        latest_briefing = briefing_handler.get_latest_briefing()
+        
+        if latest_briefing.get("status") == "not_found":
+            return (True, "I don't have any completed briefings to show you yet.")
+        
+        if "briefing" in latest_briefing:
+            # We have the briefing content
+            query = latest_briefing.get("query", "your search")
+            briefing_text = latest_briefing.get("briefing", "")
+            
+            # Create a response that includes the briefing
+            response = f"Here is your briefing on '{query}':\n\n{briefing_text}"
+            return (True, response)
+        elif "briefing_path" in latest_briefing:
+            # We have a path to the briefing file
+            try:
+                query = latest_briefing.get("query", "your search")
+                file_path = latest_briefing.get("briefing_path")
+                
+                # Read the file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    briefing_text = f.read()
+                
+                # Create a response that includes the briefing
+                response = f"Here is your briefing on '{query}':\n\n{briefing_text}"
+                return (True, response)
+            except Exception as e:
+                logger.error(f"Error reading briefing file: {e}")
+                return (True, f"I found a briefing on '{query}', but had trouble reading the file: {str(e)}")
+        else:
+            # We have a record but no content
+            query = latest_briefing.get("query", "your search")
+            status = latest_briefing.get("status", "unknown")
+            
+            if status == "error":
+                error = latest_briefing.get("error", "an unknown error")
+                return (True, f"I tried to create a briefing on '{query}', but encountered an error: {error}")
+            else:
+                return (True, f"I found a record of a briefing on '{query}', but couldn't retrieve the content.")
+    
+    # Not a show briefing request
+    return (False, None)
+
 def format_sse_message(data):
     """Format a response as a Server-Sent Event message"""
     try:
@@ -2340,6 +2446,8 @@ class EmbeddingRequest(BaseModel):
 
 
 
+# Modifications to the chat_completions endpoint to handle /briefing commands
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     # Extract request parameters
@@ -2360,6 +2468,146 @@ async def chat_completions(request: ChatCompletionRequest):
     
     user_query = latest_user_message['content']
     
+    # Check if this is a /briefing command
+    from modules.searxng_module import briefing_handler
+    is_briefing, briefing_response, task_info = await handle_possible_briefing_command(user_query, "primary_conversation")
+    
+    if is_briefing:
+        # It's a briefing command, so return a direct response
+        logger.info(f"Processed /briefing command: {task_info}")
+        
+        # Add the command and response to history
+        add_message_to_history('user', user_query)
+        add_message_to_history('assistant', briefing_response)
+        
+        # Store in Redis for vector search if available
+        if message_store:
+            try:
+                embed_and_save(user_query, "primary_conversation", "user")
+                embed_and_save(briefing_response, "primary_conversation", "assistant")
+            except Exception as e:
+                logger.error(f"Error storing message in Redis: {str(e)}")
+                
+        # Format OpenAI response
+        openai_response = {
+            "id": f"chatcmpl-{str(uuid4())}",
+            "object": "chat.completion",
+            "created": int(datetime.now().timestamp()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": briefing_response
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(user_query) // 4,  # Rough estimate
+                "completion_tokens": len(briefing_response) // 4,  # Rough estimate
+                "total_tokens": (len(user_query) + len(briefing_response)) // 4  # Rough estimate
+            }
+        }
+        
+        # Check if streaming is requested
+        if stream:
+            async def stream_briefing_response():
+                # Return the briefing response in a chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": briefing_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                
+            return StreamingResponse(stream_briefing_response(), media_type="text/event-stream")
+        else:
+            return JSONResponse(content=openai_response)
+    
+    # Check if this is a request to show a briefing
+    is_show_request, show_response = await handle_show_briefing_request(user_query)
+    
+    if is_show_request:
+        # It's a request to show a briefing
+        logger.info("Processed show briefing request")
+        
+        # Add the user query and response to history
+        add_message_to_history('user', user_query)
+        add_message_to_history('assistant', show_response)
+        
+        # Store in Redis for vector search if available
+        if message_store:
+            try:
+                embed_and_save(user_query, "primary_conversation", "user")
+                embed_and_save(show_response, "primary_conversation", "assistant")
+            except Exception as e:
+                logger.error(f"Error storing message in Redis: {str(e)}")
+                
+        # Format OpenAI response
+        openai_response = {
+            "id": f"chatcmpl-{str(uuid4())}",
+            "object": "chat.completion",
+            "created": int(datetime.now().timestamp()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": show_response
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(user_query) // 4,  # Rough estimate
+                "completion_tokens": len(show_response) // 4,  # Rough estimate
+                "total_tokens": (len(user_query) + len(show_response)) // 4  # Rough estimate
+            }
+        }
+        
+        # Check if streaming is requested
+        if stream:
+            async def stream_show_response():
+                # Return the show response in a chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": show_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                
+            return StreamingResponse(stream_show_response(), media_type="text/event-stream")
+        else:
+            return JSONResponse(content=openai_response)
+    
+    # Not a briefing command or show request, continue with normal processing
     # Add user message to history
     add_message_to_history('user', user_query)
     
@@ -2571,6 +2819,90 @@ async def receive_chat_message(data: dict = Body(...)):
         
         logger.info(f"Legacy chat API called")
         
+        # Check if this is a /briefing command
+        from modules.searxng_module import briefing_handler
+        is_briefing, briefing_response, task_info = await handle_possible_briefing_command(msg_content, "primary_conversation")
+        
+        if is_briefing:
+            # It's a briefing command, so return a direct response
+            logger.info(f"Processed /briefing command in legacy API: {task_info}")
+            
+            # Add the command and response to history
+            add_message_to_history('user', msg_content)
+            add_message_to_history('assistant', briefing_response)
+            
+            # Optionally store in Redis for vector search
+            if message_store:
+                embed_and_save(msg_content, "primary_conversation", "user")
+                embed_and_save(briefing_response, "primary_conversation", "assistant")
+            
+            # Stream the response in the legacy format
+            async def stream_briefing_response():
+                # Format as OpenAI chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": briefing_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                
+                # Return fixed conversation ID in the response
+                yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
+                
+            return StreamingResponse(stream_briefing_response(), media_type="text/event-stream")
+        
+        # Check if this is a request to show a briefing
+        is_show_request, show_response = await handle_show_briefing_request(msg_content)
+        
+        if is_show_request:
+            # It's a request to show a briefing
+            logger.info("Processed show briefing request in legacy API")
+            
+            # Add the user query and response to history
+            add_message_to_history('user', msg_content)
+            add_message_to_history('assistant', show_response)
+            
+            # Optionally store in Redis for vector search
+            if message_store:
+                embed_and_save(msg_content, "primary_conversation", "user")
+                embed_and_save(show_response, "primary_conversation", "assistant")
+            
+            # Stream the response in the legacy format
+            async def stream_show_response():
+                # Format as OpenAI chat completion chunk
+                response_chunk = {
+                    "id": f"chatcmpl-{str(uuid4())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": show_response
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(response_chunk)}\n\n"
+                
+                # Return fixed conversation ID in the response
+                yield f"\ndata: {{\"conversation_id\": \"primary_conversation\"}}\n\n"
+                
+            return StreamingResponse(stream_show_response(), media_type="text/event-stream")
+        
+        # Not a briefing command or show request, continue with normal processing
         # Add user message to history
         add_message_to_history('user', msg_content)
         
@@ -2714,6 +3046,69 @@ async def some_other_function():
     except Exception as e:
         logger.error(f"Error in some_other_function: {e}")
         raise
+
+async def handle_possible_briefing_command(user_message, conversation_id=None):
+    """
+    Check if a user message is a /briefing command and handle it if so
+    
+    Args:
+        user_message (str): The user's message
+        conversation_id (str): Optional conversation ID
+        
+    Returns:
+        tuple: (is_briefing_command, response_message, task_info)
+    """
+    message = user_message.strip()
+    
+    # Check if this is a briefing command
+    if message.startswith("/briefing "):
+        # Extract the search query
+        query = message[10:].strip()
+        
+        if not query:
+            return (True, "Please provide a search query after /briefing.", None)
+        
+        # Start the briefing task
+        task_info = await briefing_handler.process_briefing_command(query, conversation_id)
+        
+        # Create a response message
+        response = f"I've started collecting information on '{query}'. This process will run in the background, allowing us to continue our conversation. I'll let you know when the briefing is ready."
+        
+        return (True, response, task_info)
+    
+    # Not a briefing command
+    return (False, None, None)
+
+async def check_briefing_completion(task_id, max_wait_time=300):
+    """
+    Check if a briefing task has completed and return the result
+    
+    Args:
+        task_id (str): The ID of the task to check
+        max_wait_time (int): Maximum time to wait in seconds
+        
+    Returns:
+        dict: The briefing result or None if not completed
+    """
+    start_time = asyncio.get_event_loop().time()
+    
+    while (asyncio.get_event_loop().time() - start_time) < max_wait_time:
+        # Check task status
+        status = briefing_handler.get_task_status(task_id)
+        
+        if status.get("status") == "completed":
+            # Task is completed
+            return status
+        
+        if status.get("status") == "error":
+            # Task encountered an error
+            return status
+        
+        # Wait a bit before checking again
+        await asyncio.sleep(5)
+    
+    # Task didn't complete within the time limit
+    return {"status": "timeout", "message": "Briefing task did not complete within the time limit"}
 
 # API Endpoints
 @dashboard_router.get("/v1/notes")
@@ -3140,6 +3535,58 @@ async def get_gpu_usage():
             "error": str(e)
         }
 
+@app.get("/v1/stats/tokens")
+async def get_token_stats():
+    """Get token usage statistics"""
+    try:
+        # First try to get token stats from Redis
+        token_stats_json = None
+        
+        if hasattr(message_store, 'client') and hasattr(message_store.client, 'redis_client'):
+            token_stats_json = message_store.client.redis_client.get("token_stats")
+        elif hasattr(message_store, 'message_store'):
+            token_stats_json = message_store.message_store.get("token_stats")
+        elif hasattr(message_store, 'redis_client'):
+            token_stats_json = message_store.redis_client.get("token_stats")
+        
+        if token_stats_json:
+            if isinstance(token_stats_json, bytes):
+                token_stats_json = token_stats_json.decode('utf-8')
+            
+            try:
+                token_stats = json.loads(token_stats_json)
+                return token_stats
+            except json.JSONDecodeError:
+                logger.error("Error decoding token stats JSON")
+        
+        # If we couldn't get stats from Redis, calculate based on conversation history
+        total_tokens = 0
+        history_tokens = 0
+        
+        # Count tokens in current conversation history
+        for msg in MESSAGE_HISTORY:
+            msg_tokens = count_tokens(msg.get('content', ''))
+            total_tokens += msg_tokens
+            history_tokens += msg_tokens
+        
+        # Add system prompt tokens
+        system_tokens = count_tokens(SYSTEM_PROMPT)
+        total_tokens += system_tokens
+        
+        return {
+            "system_tokens": system_tokens,
+            "history_tokens": history_tokens,
+            "total_tokens": total_tokens
+        }
+    except Exception as e:
+        logger.error(f"Error getting token stats: {str(e)}")
+        # Return default values in case of error
+        return {
+            "system_tokens": 0,
+            "history_tokens": 0,
+            "total_tokens": 0
+        }
+
 @app.post("/v1/clear-conversation")
 async def clear_conversation(request: dict = Body(...)):
     """Clear the conversation history for a specific conversation ID"""
@@ -3375,6 +3822,131 @@ async def debug_classify_intent(request: dict = Body(...)):
     except Exception as e:
         logger.error(f"Error in debug intent classification: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error classifying intent: {str(e)}")
+
+
+@briefing_router.get("/status/{task_id}")
+async def get_briefing_status(task_id: str):
+    """Get the status of a briefing task"""
+    return briefing_handler.get_task_status(task_id)
+
+
+# Endpoint to get the latest briefing
+@briefing_router.get("/latest")
+async def get_latest_briefing(query: str = None):
+    """Get the latest completed briefing"""
+    return briefing_handler.get_latest_briefing(query)
+
+
+# Endpoint to manually start a briefing task
+@briefing_router.post("/search")
+async def start_briefing_search(data: dict):
+    """Start a new briefing search task"""
+    query = data.get("query", "")
+    conversation_id = data.get("conversation_id", None)
+    
+    if not query:
+        return {"status": "error", "message": "Query is required"}
+    
+    result = await briefing_handler.process_briefing_command(query, conversation_id)
+    return result
+
+
+@briefings_router.get("/list")
+async def list_briefings():
+    """List all available briefings from the briefings directory"""
+    try:
+        briefings = []
+        
+        # Get all markdown files in the directory
+        for filename in os.listdir(BRIEFINGS_DIRECTORY):
+            if filename.endswith('.md'):
+                file_path = os.path.join(BRIEFINGS_DIRECTORY, filename)
+                
+                # Get file stats
+                stats = os.stat(file_path)
+                created_time = datetime.fromtimestamp(stats.st_ctime)
+                modified_time = datetime.fromtimestamp(stats.st_mtime)
+                
+                # Extract title from filename (remove date and extension if present)
+                title = filename
+                # Remove extension
+                if title.endswith('.md'):
+                    title = title[:-3]
+                # Try to extract date pattern like 20240326_
+                date_match = re.match(r'^\d{8}_(.+)$', title)
+                if date_match:
+                    title = date_match.group(1)
+                # Replace underscores with spaces
+                title = title.replace('_', ' ')
+                # Title case
+                title = title.title()
+                
+                # Try to extract a better title from first line of the file
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        first_line = f.readline().strip()
+                        if first_line.startswith('# '):
+                            title = first_line[2:]
+                except Exception as e:
+                    logging.warning(f"Could not read first line of {filename}: {e}")
+                
+                # Add to briefings list
+                briefings.append({
+                    "filename": filename,
+                    "title": title,
+                    "path": file_path,
+                    "created": created_time.isoformat(),
+                    "modified": modified_time.isoformat(),
+                    "size": stats.st_size
+                })
+        
+        # Sort by creation time (newest first)
+        briefings.sort(key=lambda x: x["created"], reverse=True)
+        
+        return {"briefings": briefings}
+    except Exception as e:
+        logging.error(f"Error listing briefings: {e}")
+        return {"error": str(e), "briefings": []}
+
+@briefings_router.get("/content/{filename}")
+async def get_briefing_content(filename: str):
+    """Get the content of a specific briefing file"""
+    try:
+        file_path = os.path.join(BRIEFINGS_DIRECTORY, filename)
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            return {"error": f"Briefing file {filename} not found"}
+        
+        # Return the file content
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return {"content": content, "filename": filename}
+    except Exception as e:
+        logging.error(f"Error getting briefing content: {e}")
+        return {"error": str(e)}
+
+@briefings_router.get("/file/{filename}")
+async def get_briefing_file(filename: str):
+    """Return the briefing file directly"""
+    try:
+        file_path = os.path.join(BRIEFINGS_DIRECTORY, filename)
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Briefing file {filename} not found")
+        
+        # Return the file
+        return FileResponse(file_path, media_type="text/markdown")
+    except Exception as e:
+        logging.error(f"Error serving briefing file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add this to the app after defining all routes
+def setup_briefings_routes(app):
+    app.include_router(briefings_router, prefix="/v1/briefings", tags=["briefings"])
+    logging.info("Briefings routes added")
 
 @app.get("/health", status_code=200)
 async def health_check():
