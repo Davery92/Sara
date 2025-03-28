@@ -6,6 +6,7 @@ import StatCard from '../components/StatCard';
 import SystemStatusCard from '../components/SystemStatusCard';
 import NotesList from '../components/NotesList';
 import BriefingsList from '../components/BriefingsList';
+import CoreMemoriesCard from '../components/CoreMemoriesCard';
 
 const DashboardPage = () => {
   const [showSidebar, setShowSidebar] = useState(true);
@@ -284,7 +285,7 @@ const DashboardPage = () => {
                   />
                 </div>
                 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
                   <SystemStatusCard 
                     systemStatus={systemStatus}
                     onRefresh={loadSystemStatus}
@@ -295,6 +296,11 @@ const DashboardPage = () => {
                     onOpenBriefing={handleOpenBriefing}
                     onRefresh={loadBriefings}
                   />
+                </div>
+                
+                {/* Core Memories Section */}
+                <div className="mb-6">
+                  <CoreMemoriesCard onRefresh={loadNotes} />
                 </div>
                 
                 <div className="mt-6">

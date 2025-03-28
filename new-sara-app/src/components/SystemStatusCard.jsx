@@ -1,14 +1,46 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { ArrowPathIcon } from '@heroicons/react/24/outline';
 
 const SystemStatusCard = ({ systemStatus, onRefresh }) => {
+  const [gpuData, setGpuData] = useState({ memoryUsed: 0, memoryTotal: 48 });
+  
+  useEffect(() => {
+    loadGpuData();
+  }, []);
+  
+  const loadGpuData = async () => {
+    try {
+      const response = await fetch('/v1/system/gpu');
+      if (response.ok) {
+        const data = await response.json();
+        setGpuData({
+          memoryUsed: data.memory_used || 0,
+          memoryTotal: data.memory_total || 48
+        });
+      }
+    } catch (error) {
+      console.error('Error loading GPU data:', error);
+    }
+  };
+  
+  const calculateMemoryPercentage = () => {
+    if (gpuData.memoryTotal === 0) return 0;
+    return Math.min((gpuData.memoryUsed / gpuData.memoryTotal) * 100, 100);
+  };
+  
+  const formatGpuMemory = () => {
+    return `${gpuData.memoryUsed.toFixed(1)} GB / ${gpuData.memoryTotal.toFixed(1)} GB`;
+  };
   return (
     <div className="bg-card-bg rounded-lg overflow-hidden">
       <div className="p-4 border-b border-border-color flex justify-between items-center">
         <h3 className="font-medium">System Status</h3>
         <button 
           className="p-1.5 text-sm bg-hover-color text-muted-color rounded flex items-center gap-1.5 hover:text-text-color transition-colors"
-          onClick={onRefresh}
+          onClick={() => {
+            onRefresh();
+            loadGpuData();
+          }}
         >
           <ArrowPathIcon className="w-4 h-4" />
           Refresh
@@ -41,10 +73,10 @@ const SystemStatusCard = ({ systemStatus, onRefresh }) => {
           <div className="bg-input-bg rounded h-2.5 overflow-hidden mb-2">
             <div 
               className="h-full bg-accent-color"
-              style={{ width: '45%' }} // This would be calculated from actual data
+              style={{ width: `${calculateMemoryPercentage()}%` }}
             ></div>
           </div>
-          <p className="text-sm text-muted-color">5.8 GB / 12 GB</p>
+          <p className="text-sm text-muted-color">{formatGpuMemory()}</p>
         </div>
       </div>
     </div>

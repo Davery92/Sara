@@ -1,12 +1,11 @@
 """
-Integration of RAG module with the main FastAPI server
+Integration of the RAG module with the main FastAPI server
 """
 
 from fastapi import FastAPI
 import logging
-from .rag_module import RAGManager
-from .rag_api import rag_router
-from .rag_web_interface import integrate_web_interface
+from .neo4j_rag_integration import get_neo4j_rag_manager
+from .rag_api_simplified import rag_router
 
 # Configure logging
 logger = logging.getLogger("rag-integration")
@@ -43,16 +42,15 @@ RAG_TOOL_DEFINITION = {
 }
 
 async def search_knowledge_base(query: str, top_k: int = 3, filter_tags: list = None):
+    """
+    Search the knowledge base and return formatted results.
+    This function is called by the LLM when using the search_knowledge_base tool.
+    """
     try:
-        # Import here to avoid circular imports
-        from .neo4j_rag_integration import get_neo4j_rag_manager
+        # Get RAG manager
+        rag_manager = get_neo4j_rag_manager()
         
-        # Initialize RAG manager if needed
-        global rag_manager
-        if not rag_manager:
-            rag_manager = get_neo4j_rag_manager()
-        
-        # Perform search (now with await)
+        # Perform search
         results = await rag_manager.search(
             query=query,
             top_k=top_k,
@@ -76,12 +74,14 @@ async def search_knowledge_base(query: str, top_k: int = 3, filter_tags: list = 
         logger.error(f"Error in search_knowledge_base: {e}")
         return f"Error searching knowledge base: {str(e)}"
 
-# Initialize RAG manager (will be lazy-loaded)
-rag_manager = None
-
 def integrate_rag_with_server(app: FastAPI, available_tools: dict, tool_definitions: list):
     """
     Integrate RAG with the main server
+    
+    Args:
+        app: The FastAPI application
+        available_tools: Dictionary of available tools
+        tool_definitions: List of tool definitions
     """
     try:
         # Include RAG router
@@ -100,10 +100,6 @@ def integrate_rag_with_server(app: FastAPI, available_tools: dict, tool_definiti
         @app.get("/rag/health")
         async def rag_health():
             return {"status": "healthy", "service": "RAG"}
-        
-        # Integrate web interface
-        integrate_web_interface(app)
-        logger.info("RAG web interface integrated")
         
         logger.info("RAG integration complete")
         

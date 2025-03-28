@@ -380,9 +380,10 @@ def save_results(results, output_file="search_results.json"):
     logger.info(f"Results saved to {output_file}")
 
 
+
 def save_briefing(briefing, query, briefing_model="model", output_dir="/home/david/Sara/briefings"):
     """
-    Save briefing to a markdown file in the specified directory
+    Save briefing to a markdown file in the specified directory and send notifications
     
     Args:
         briefing (str): Briefing content
@@ -414,7 +415,33 @@ def save_briefing(briefing, query, briefing_model="model", output_dir="/home/dav
         f.write(md_content)
     
     logger.info(f"Briefing saved to {file_path}")
+    
+    # Send notifications
+    try:
+        # Import notification service
+        from notification_service import notification_service
+        
+        # Send ntfy notification
+        notification_service.send_briefing_completion_notification(query, filename)
+        logger.info(f"Sent notification for completed briefing: {query}")
+    except Exception as e:
+        logger.error(f"Error sending briefing notification: {str(e)}")
+    
     return file_path
+
+# Add to the _generate_briefing_background method in SearXNGBriefingHandler
+# Right after saving the briefing (where you set self.active_searches[task_id]["briefing_path"])
+
+# Add this code:
+"""
+# Send a WebSocket notification to the chat UI
+try:
+    from notification_service import notification_service
+    notification_service.send_briefing_completion_notification(query, filename)
+    logger.info(f"Sent notification for completed briefing: {query}")
+except Exception as e:
+    logger.error(f"Error sending briefing notification: {str(e)}")
+"""
 
 
 class SearXNGBriefingHandler:
@@ -524,6 +551,12 @@ class SearXNGBriefingHandler:
                 
                 self.active_searches[task_id]["briefing_path"] = briefing_path
                 self.active_searches[task_id]["briefing"] = results["briefing"]
+                try:
+                    from notification_service import notification_service
+                    notification_service.send_briefing_completion_notification(query, filename)
+                    logger.info(f"Sent notification for completed briefing: {query}")
+                except Exception as e:
+                    logger.error(f"Error sending briefing notification: {str(e)}")
             
             logger.info(f"Completed briefing task {task_id}")
             return results

@@ -28,9 +28,9 @@ from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 import os
 from fastapi import BackgroundTasks, APIRouter
 from modules.neo4j_rag_integration import Neo4jRAGManager, get_neo4j_rag_manager
-from modules.rag_api import rag_router  # Import this first
-from modules.rag_web_interface import integrate_web_interface
-from modules.rag_integration import integrate_rag_with_server, update_system_prompt_with_rag_info
+from modules.rag_api_simplified import rag_router
+from modules.rag_integration_simplified import integrate_rag_with_server, update_system_prompt_with_rag_info
+
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
@@ -44,6 +44,8 @@ import tiktoken
 from openai import OpenAI
 import requests
 import re
+from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 
 # Initialize the message store with Neo4j backend
@@ -61,7 +63,7 @@ logging.basicConfig(
 logger = logging.getLogger("openai-compatible-server")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 app = FastAPI(title="OpenAI API Compatible Server")
-
+app.include_router(rag_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Adjust this in production!
@@ -69,7 +71,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+active_connections = []
 # Define the notes directory
 NOTES_DIRECTORY = "/home/david/Sara/notes"
 
@@ -137,7 +139,33 @@ MODEL_URLS = {
 }
 
 
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections = []
 
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception as e:
+                logger.error(f"Error broadcasting message: {str(e)}")
+                # Remove failed connections
+                self.disconnect(connection)
+
+# Create a connection manager instance
+websocket_manager = ConnectionManager()
 
 # Redis connection setup
 class RedisClient:
@@ -470,8 +498,7 @@ async def startup_event():
     logger.info("System prompt loaded")
     
     # Include the RAG router
-    app.include_router(rag_router, prefix="/rag")
-    logger.info("RAG router included")
+    
     
     # Initialize intent classifier
     intent_classifier = get_intent_classifier()
@@ -479,7 +506,7 @@ async def startup_event():
     logger.info(f"Intent classifier loaded with {len(available_intents)} intents: {', '.join(available_intents)}")
     
     # Integrate the web interface
-    integrate_web_interface(app)
+    integrate_rag_with_server(app, AVAILABLE_TOOLS, TOOL_DEFINITIONS)
     logger.info("Web interface integrated")
     
     # Update the system prompt with available notes
@@ -504,7 +531,8 @@ async def startup_event():
         logger.info("Connected to Redis database successfully")
     else:
         logger.warning("Failed to connect to Redis database - functionality may be limited")
-    
+    integrate_rag_with_server(app, AVAILABLE_TOOLS, TOOL_DEFINITIONS)
+    logger.info("RAG module integrated with server")
     # Integrate Neo4j with the server
     integrate_neo4j_with_server(app)
     logger.info("Neo4j module integrated with server")
@@ -593,6 +621,16 @@ async def delete_conversation(conversation_id: str):
         logger.error(f"Error deleting conversation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.websocket("/ws/briefings")
+async def websocket_briefing_status(websocket: WebSocket):
+    """WebSocket endpoint for real-time briefing status updates"""
+    await websocket_manager.connect(websocket)
+    try:
+        while True:
+            # Just wait for messages (we won't use them, but this keeps the connection alive)
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        websocket_manager.disconnect(websocket)
 
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str):
@@ -1062,24 +1100,6 @@ conversation_buffer = ConversationBuffer(max_buffer_size=10)
 
 
 
-def list_notes() -> List[Dict[str, Any]]:
-    """List all available notes with metadata"""
-    try:
-        notes = []
-        for filename in os.listdir(NOTES_DIRECTORY):
-            if filename.endswith('.json'):
-                file_path = os.path.join(NOTES_DIRECTORY, filename)
-                with open(file_path, 'r') as f:
-                    note_data = json.load(f)
-                    note_data['filename'] = filename
-                    notes.append(note_data)
-        
-        # Sort notes by last modified time, newest first
-        notes.sort(key=lambda x: x.get('last_modified', ''), reverse=True)
-        return notes
-    except Exception as e:
-        logger.error(f"Error listing notes: {e}")
-        return []
 
 def get_note_names_for_prompt() -> str:
     """Get a formatted list of note names for the system prompt"""
@@ -1166,11 +1186,11 @@ async def summarize_conversation(conversation_id):
         return summary
     return None
 
-async def read_note(identifier: str) -> Dict[str, Any]:
+def read_note(identifier: str) -> Dict[str, Any]:
     """Read a note by title or filename"""
     try:
         # Properly await the coroutine
-        notes = await list_notes()
+        notes = list_notes()
         
         # Try to find the note by exact title match first
         for note in notes:
@@ -1329,6 +1349,25 @@ async def log_requests(request: Request, call_next):
         # Log any exceptions
         logger.error(f"Request failed: {method} {url} - Error: {str(e)}")
         raise
+
+# Helper function to list all notes
+def list_notes():
+    """List all notes from the notes directory."""
+    try:
+        notes = []
+        for filename in os.listdir(NOTES_DIRECTORY):
+            if filename.endswith(".json"):
+                file_path = os.path.join(NOTES_DIRECTORY, filename)
+                with open(file_path, "r") as f:
+                    note_data = json.load(f)
+                    notes.append({
+                        "filename": filename,
+                        **note_data
+                    })
+        return notes
+    except Exception as e:
+        logger.error(f"Error listing notes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def handle_request_based_on_intent(messages, model, user_query, prediction_result, stream=True):
     """
@@ -3008,24 +3047,7 @@ class NoteUpdate(BaseModel):
     content: Optional[str] = None
     tags: Optional[List[str]] = None
 
-# Helper function to list all notes
-async def list_notes():
-    """List all notes from the notes directory."""
-    try:
-        notes = []
-        for filename in os.listdir(NOTES_DIRECTORY):
-            if filename.endswith(".json"):
-                file_path = os.path.join(NOTES_DIRECTORY, filename)
-                with open(file_path, "r") as f:
-                    note_data = json.load(f)
-                    notes.append({
-                        "filename": filename,
-                        **note_data
-                    })
-        return notes
-    except Exception as e:
-        logger.error(f"Error listing notes: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Helper function to get note names for the prompt
 async def get_note_names_for_prompt():
@@ -3115,7 +3137,7 @@ async def check_briefing_completion(task_id, max_wait_time=300):
 async def list_notes_endpoint(limit: int = 100, offset: int = 0):
     """List all notes with pagination"""
     try:
-        notes = await list_notes()  # Await the coroutine
+        notes = list_notes()  # Await the coroutine
         
         # Apply pagination
         paginated_notes = notes[offset:offset + limit]
@@ -3129,7 +3151,7 @@ async def list_notes_endpoint(limit: int = 100, offset: int = 0):
 async def get_notes_count():
     """Get the total count of notes"""
     try:
-        notes = await list_notes()  # Await the coroutine
+        notes = list_notes()  # Await the coroutine
         return {"count": len(notes)}
     except Exception as e:
         logger.error(f"Error counting notes: {e}")
@@ -3160,7 +3182,7 @@ async def get_note_endpoint(note_id: str):
     """Get a note by its identifier"""
     try:
         # Await the async function
-        note = await read_note(note_id)
+        note = read_note(note_id)
         
         if "error" in note:
             raise HTTPException(status_code=404, detail=note["error"])
