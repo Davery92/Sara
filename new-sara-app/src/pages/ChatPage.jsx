@@ -27,6 +27,66 @@ const ChatPage = () => {
   const messageContainerRef = useRef(null);
   const textareaRef = useRef(null);
 
+  // WebSocket for briefing notifications
+  useEffect(() => {
+    // Check if WebSocket is supported
+    if (!('WebSocket' in window)) {
+      console.warn('WebSockets not supported in this browser');
+      return;
+    }
+
+    // Determine WebSocket URL based on current location
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/briefings`;
+    
+    // Create WebSocket connection
+    const socket = new WebSocket(wsUrl);
+    
+    socket.onopen = () => {
+      console.log('WebSocket connection established for briefing notifications');
+    };
+    
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        // Handle briefing completion notification
+        if (data.type === 'briefing_completed') {
+          // Show toast notification using the global showToast function
+          if (window.showToast) {
+            window.showToast(
+              `Your briefing on "${data.query}" is now available.`, 
+              'success',
+              8000 // Show for 8 seconds
+            );
+          }
+          
+          // Optionally play a notification sound
+          const notificationSound = new Audio('/notification.mp3');
+          notificationSound.play().catch(e => console.warn('Error playing notification sound:', e));
+        }
+      } catch (error) {
+        console.error('Error handling WebSocket message:', error);
+      }
+    };
+    
+    socket.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+    
+    socket.onclose = () => {
+      console.log('WebSocket connection closed');
+    };
+    
+    // Clean up the WebSocket connection when component unmounts
+    return () => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+    };
+  }, []);
+
+
   // Check if mobile on mount and window resize
   useEffect(() => {
     const checkIfMobile = () => {
@@ -85,9 +145,22 @@ const ChatPage = () => {
         
         try {
           const response = await fetch('/v1/chat/current-session');
-          // Rest of your existing code...
+          
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          
+          const data = await response.json();
+          
+          if (data.messages && data.messages.length > 0) {
+            setMessages(data.messages);
+            setShowEmptyState(false);
+          } else {
+            setShowEmptyState(true);
+          }
         } catch (error) {
           console.error('Error loading current session:', error);
+          setShowEmptyState(true);
         }
       };
 
@@ -364,7 +437,7 @@ const ChatPage = () => {
         onVoiceChange={handleVoiceChange}
       />
       
-      <div className="flex-1 flex flex-col h-screen max-h-screen relative overflow-hidden">
+      <div className="flex-1 flex flex-col h-screen max-h-screen relative">
         <button 
           className={`absolute top-4 left-4 z-10 p-1 text-muted-color hover:bg-hover-color rounded md:hidden`}
           onClick={() => setShowSidebar(!showSidebar)}
@@ -399,7 +472,7 @@ const ChatPage = () => {
         </header>
         
         {showEmptyState ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center mb-20">
+          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center mb-16">
             <div className="text-accent-color text-5xl mb-6">
               <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10"></circle>
@@ -430,10 +503,10 @@ const ChatPage = () => {
           </div>
         ) : (
           <div 
-            className="flex-1 overflow-y-auto min-h-0 flex flex-col"
+            className="flex-1 overflow-y-auto pb-20"
             ref={messageContainerRef}
           >
-            <div className="flex-grow flex flex-col py-6 pb-24">
+            <div className="py-6">
               {messages.map((message, index) => (
                 <div key={index} className={`chat-message ${message.role}`}>
                   <div className={`avatar ${message.role}`}>
@@ -465,7 +538,8 @@ const ChatPage = () => {
           </div>
         )}
         
-        <div className="border-t border-border-color p-4 absolute bottom-0 left-0 right-0 bg-bg-color">
+        {/* Fixed position footer instead of absolute */}
+        <div className="border-t border-border-color p-4 fixed bottom-0 left-0 right-0 bg-bg-color z-10">
           <div className="relative max-w-3xl mx-auto">
             <textarea
               ref={textareaRef}
