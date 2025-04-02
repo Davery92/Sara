@@ -2,8 +2,21 @@ import { useState, useEffect, useRef } from 'react';
 import { Bars3Icon } from '@heroicons/react/24/outline';
 import Sidebar from '../components/Sidebar';
 import BriefingModal from '../components/BriefingModal';
-import { formatMessage } from '../utils/formatters';
+import { formatMessage, cleanTextForTTS } from '../utils/formatters'; // Added cleanTextForTTS import
 import SuggestionChip from '../components/SuggestionChip';
+import webSocketManager from '../utils/websocketUtil';
+
+// Helper to ensure AudioContext is available
+const getAudioContext = () => {
+  if (typeof window !== 'undefined') {
+    window.AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (window.AudioContext) {
+      return new window.AudioContext();
+    }
+  }
+  console.error('Web Audio API is not supported in this browser.');
+  return null;
+};
 
 const ChatPage = () => {
   // State
@@ -20,36 +33,36 @@ const ChatPage = () => {
     title: '',
     filename: ''
   });
-  const [currentTTSAudio, setCurrentTTSAudio] = useState(null);
+  const [isPreparingAudio, setIsPreparingAudio] = useState(false);
   
   // Refs
   const messagesEndRef = useRef(null);
   const messageContainerRef = useRef(null);
   const textareaRef = useRef(null);
+  const isInitialMount = useRef(true); // Track initial mount
+  const clearChatAfterNew = useRef(false); // Track if clear chat is needed after new chat
+  // Audio refs - similar to BriefingModal
+  const audioContextRef = useRef(null);
+  const sourceNodeRef = useRef(null);
+  const audioBufferRef = useRef(null);
 
-  // WebSocket for briefing notifications
   useEffect(() => {
-    // Check if WebSocket is supported
-    if (!('WebSocket' in window)) {
-      console.warn('WebSockets not supported in this browser');
-      return;
-    }
-
-    // Determine WebSocket URL based on current location
+    // Define the WebSocket URLs based on current location
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/briefings`;
+    const briefingsUrl = `${protocol}//${window.location.host}/ws/briefings`;
+    const chatUrl = `${protocol}//${window.location.host}/ws/chat`;
     
-    // Create WebSocket connection
-    const socket = new WebSocket(wsUrl);
-    
-    socket.onopen = () => {
-      console.log('WebSocket connection established for briefing notifications');
+    // Set up briefings WebSocket
+    const briefingsOptions = {
+      autoReconnect: true,
+      maxReconnectAttempts: 3,
+      reconnectDelay: 3000,
+      debug: true
     };
     
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        
+    // Register handlers for briefings WebSocket
+    webSocketManager.registerHandlers('briefings', {
+      message: (data) => {
         // Handle briefing completion notification
         if (data.type === 'briefing_completed') {
           // Show toast notification using the global showToast function
@@ -65,27 +78,107 @@ const ChatPage = () => {
           const notificationSound = new Audio('/notification.mp3');
           notificationSound.play().catch(e => console.warn('Error playing notification sound:', e));
         }
-      } catch (error) {
-        console.error('Error handling WebSocket message:', error);
+      },
+      error: (error) => {
+        console.error('Briefing WebSocket error:', error);
+      },
+      open: () => {
+        console.log('Briefing WebSocket connection established');
+      },
+      close: (event) => {
+        console.log('Briefing WebSocket connection closed:', event.code, event.reason);
       }
+    });
+    
+    // Set up chat WebSocket
+    const chatOptions = {
+      autoReconnect: true,
+      maxReconnectAttempts: 3,
+      reconnectDelay: 3000,
+      debug: true
     };
     
-    socket.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
+    // Register handlers for chat WebSocket
+    webSocketManager.registerHandlers('chat', {
+      message: (data) => {
+        // Nothing special to do here as pings are automatically handled
+      },
+      error: (error) => {
+        console.error('Chat WebSocket error:', error);
+      },
+      open: () => {
+        console.log('Chat WebSocket connection established');
+      },
+      close: (event) => {
+        console.log('Chat WebSocket connection closed:', event.code, event.reason);
+      }
+    });
     
-    socket.onclose = () => {
-      console.log('WebSocket connection closed');
-    };
+    // Establish the connections
+    webSocketManager.getConnection(briefingsUrl, 'briefings', briefingsOptions);
+    webSocketManager.getConnection(chatUrl, 'chat', chatOptions);
     
-    // Clean up the WebSocket connection when component unmounts
+    // Clean up function to close WebSockets when component unmounts
     return () => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.close();
-      }
+      console.log('Closing WebSocket connections due to component unmount');
+      webSocketManager.closeConnection('briefings');
+      webSocketManager.closeConnection('chat');
     };
   }, []);
 
+
+  // Initialize AudioContext - similar to BriefingModal
+  useEffect(() => {
+    if (!audioContextRef.current && ttsEnabled) {
+      try {
+        audioContextRef.current = getAudioContext();
+        console.log('AudioContext initialized state:', audioContextRef.current?.state);
+      } catch (e) {
+        console.error("Error creating AudioContext:", e);
+        if (window.showToast) {
+          window.showToast("Audio playback not supported in this browser.", "error");
+        }
+      }
+    }
+  }, [ttsEnabled]);
+
+  // Audio cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopAndCleanupAudio(true);
+    };
+  }, []);
+
+  // Stop and cleanup audio function - similar to BriefingModal
+  const stopAndCleanupAudio = (isUnmounting = false) => {
+    console.log('Stopping and cleaning up audio...');
+    if (sourceNodeRef.current) {
+      try {
+        sourceNodeRef.current.onended = null;
+        sourceNodeRef.current.stop();
+        console.log('Audio source node stopped.');
+      } catch (e) {
+        console.warn("Error stopping source node (might have already finished):", e);
+      }
+      sourceNodeRef.current = null;
+    }
+
+    // Reset states
+    setIsPreparingAudio(false);
+    audioBufferRef.current = null;
+
+    // Close the context completely only when the component unmounts
+    if (isUnmounting && audioContextRef.current) {
+      if (audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close().then(() => {
+          console.log('AudioContext closed.');
+          audioContextRef.current = null;
+        }).catch(e => console.error("Error closing AudioContext:", e));
+      } else {
+        audioContextRef.current = null;
+      }
+    }
+  };
 
   // Check if mobile on mount and window resize
   useEffect(() => {
@@ -109,9 +202,20 @@ const ChatPage = () => {
     const savedTTSEnabled = localStorage.getItem('ttsEnabled') === 'true';
     const savedVoice = localStorage.getItem('ttsVoice');
     
+    console.log('Initial TTS enabled state:', savedTTSEnabled);
     setTtsEnabled(savedTTSEnabled);
     if (savedVoice) {
       setSelectedVoice(savedVoice);
+    }
+    
+    // Initialize AudioContext if TTS is enabled
+    if (savedTTSEnabled && !audioContextRef.current) {
+      try {
+        audioContextRef.current = getAudioContext();
+        console.log('AudioContext initialized on load:', audioContextRef.current?.state);
+      } catch (e) {
+        console.error("Error creating AudioContext on load:", e);
+      }
     }
   }, []);
 
@@ -131,27 +235,24 @@ const ChatPage = () => {
     };
   }, []);
 
-  // Load conversation history on mount
-  useEffect(() => {
-    const loadCurrentSession = async () => {
-        // Check if chat was cleared
+    // Load conversation history on mount
+    useEffect(() => {
+      const loadCurrentSession = async () => {
+        // Check if chat was cleared during new chat or on initial load
         if (localStorage.getItem('chatCleared') === 'true') {
-          // Clear the flag and skip loading the conversation
           localStorage.removeItem('chatCleared');
           setMessages([]);
           setShowEmptyState(true);
           return;
         }
-        
+    
         try {
           const response = await fetch('/v1/chat/current-session');
-          
           if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
           }
-          
+    
           const data = await response.json();
-          
           if (data.messages && data.messages.length > 0) {
             setMessages(data.messages);
             setShowEmptyState(false);
@@ -161,11 +262,17 @@ const ChatPage = () => {
         } catch (error) {
           console.error('Error loading current session:', error);
           setShowEmptyState(true);
+        } finally {
+          isInitialMount.current = false; // Set to false after initial load attempt
         }
       };
-
-    loadCurrentSession();
-  }, []);
+    
+      // Load session only on initial mount, or after a clear (tracked via ref)
+      if (isInitialMount.current) {
+        loadCurrentSession();
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -188,8 +295,36 @@ const ChatPage = () => {
   };
 
   const handleTtsToggle = (enabled) => {
+    console.log('TTS toggle clicked, setting to:', enabled);
     setTtsEnabled(enabled);
     localStorage.setItem('ttsEnabled', String(enabled));
+    
+    // Initialize AudioContext if enabling TTS
+    if (enabled) {
+      if (!audioContextRef.current) {
+        try {
+          audioContextRef.current = getAudioContext();
+          console.log('AudioContext initialized on TTS toggle:', audioContextRef.current?.state);
+        } catch (e) {
+          console.error("Error creating AudioContext:", e);
+          if (window.showToast) {
+            window.showToast("Audio playback not supported in this browser.", "error");
+          }
+        }
+      } else {
+        console.log('Using existing AudioContext, state:', audioContextRef.current.state);
+        // Try to resume if suspended
+        if (audioContextRef.current.state === 'suspended') {
+          audioContextRef.current.resume().then(() => {
+            console.log('AudioContext resumed on toggle');
+          }).catch(e => {
+            console.error('Failed to resume AudioContext on toggle:', e);
+          });
+        }
+      }
+    } else {
+      console.log('TTS disabled, audio will be cleaned up on next play attempt');
+    }
   };
 
   const handleVoiceChange = (voice) => {
@@ -197,44 +332,173 @@ const ChatPage = () => {
     localStorage.setItem('ttsVoice', voice);
   };
 
-  const generateTTS = async (text, messageElement) => {
-    if (!ttsEnabled || !text) return;
+  // Updated TTS generator using Web Audio API - similar to BriefingModal
+  const generateTTS = async (text) => {
+    console.log('generateTTS called with text length:', text?.length);
+    console.log('TTS enabled:', ttsEnabled);
+    console.log('AudioContext exists:', !!audioContextRef.current);
+    
+    if (!ttsEnabled) {
+      console.log('TTS is disabled, not generating audio');
+      return;
+    }
+    
+    if (!text) {
+      console.log('No text provided for TTS');
+      return;
+    }
+    
+    if (!audioContextRef.current) {
+      console.log('No AudioContext available, attempting to create one');
+      try {
+        audioContextRef.current = getAudioContext();
+        console.log('AudioContext created on demand:', audioContextRef.current?.state);
+      } catch (e) {
+        console.error('Failed to create AudioContext on demand:', e);
+        if (window.showToast) {
+          window.showToast('Audio playback is not supported in this browser.', 'error');
+        }
+        return;
+      }
+    }
+    
+    // Stop any currently playing audio
+    stopAndCleanupAudio();
+    
+    // Set loading state for audio
+    setIsPreparingAudio(true);
     
     try {
+      // iOS User Interaction Requirement - Must be sync
+      if (audioContextRef.current.state === 'suspended') {
+        console.log('AudioContext is suspended, attempting to resume...');
+        try {
+          await audioContextRef.current.resume();
+          console.log('AudioContext resumed successfully.');
+        } catch (resumeError) {
+          console.error('Failed to resume AudioContext:', resumeError);
+          if (window.showToast) {
+            window.showToast('Could not enable audio. Please interact with the page again.', 'error');
+          }
+          setIsPreparingAudio(false);
+          return;
+        }
+      }
+      
+      // If it's not running, we can't proceed
+      if (audioContextRef.current.state !== 'running') {
+        console.error('AudioContext is not running:', audioContextRef.current.state);
+        if (window.showToast) {
+          window.showToast('Audio system is not ready. Please try clicking the text-to-speech toggle again.', 'error');
+        }
+        setIsPreparingAudio(false);
+        return;
+      }
+      
+      // Clean the text for TTS
+      const cleanedText = cleanTextForTTS(text);
+      console.log(`Cleaned text length: ${cleanedText.length}`);
+      
+      console.log(`Fetching TTS with voice: ${selectedVoice}`);
+      
+      // Try the simpler Audio approach first as fallback
+      if (window.Audio && !window.AudioContext && !window.webkitAudioContext) {
+        console.log('Falling back to simple Audio API');
+        const audio = new Audio();
+        const blob = await fetch('/v1/tts/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: cleanedText,
+            voice: selectedVoice,
+            speed: 1.0
+          })
+        }).then(r => r.blob());
+        
+        audio.src = URL.createObjectURL(blob);
+        audio.play();
+        setIsPreparingAudio(false);
+        return;
+      }
+      
+      // Web Audio API approach
       const response = await fetch('/v1/tts/generate', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
         body: JSON.stringify({
-          text: text,
+          text: cleanedText,
           voice: selectedVoice,
           speed: 1.0
         })
       });
       
+      console.log('TTS fetch response status:', response.status);
+      
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        let errorBody = `HTTP error ${response.status}`;
+        try { errorBody = (await response.json()).error || errorBody } catch(e){}
+        throw new Error(errorBody);
       }
       
-      const blob = await response.blob();
-      const audioUrl = URL.createObjectURL(blob);
-      const audio = new Audio(audioUrl);
+      // Get audio data as ArrayBuffer for Web Audio API
+      const arrayBuffer = await response.arrayBuffer();
+      console.log('TTS ArrayBuffer received, size:', arrayBuffer.byteLength);
       
-      // Stop any currently playing audio
-      if (currentTTSAudio) {
-        currentTTSAudio.pause();
-        currentTTSAudio.currentTime = 0;
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        throw new Error("AudioContext was closed unexpectedly.");
       }
       
-      // Set as current audio and play
-      setCurrentTTSAudio(audio);
-      audio.play();
+      // Decode audio data
+      console.log('Decoding audio data...');
+      const decodedBuffer = await new Promise((resolve, reject) => {
+        audioContextRef.current.decodeAudioData(arrayBuffer, resolve, (decodeError) => {
+          console.error('Error decoding audio data:', decodeError);
+          reject(new Error('Failed to decode audio data'));
+        });
+      });
       
-      return audio;
-    } catch (error) {
-      console.error('Error generating TTS:', error);
-      return null;
+      console.log('Audio decoded successfully.');
+      audioBufferRef.current = decodedBuffer;
+      
+      // Play the decoded audio
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        throw new Error("AudioContext was closed before playback could start.");
+      }
+      
+      // Stop any previous source before creating a new one
+      if (sourceNodeRef.current) {
+        try { sourceNodeRef.current.stop(); } catch(e){}
+        sourceNodeRef.current = null;
+      }
+      
+      const source = audioContextRef.current.createBufferSource();
+      source.buffer = decodedBuffer;
+      source.connect(audioContextRef.current.destination);
+      
+      source.onended = () => {
+        console.log('Audio source node playback ended.');
+        if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+          if (sourceNodeRef.current === source) {
+            sourceNodeRef.current = null;
+            setIsPreparingAudio(false);
+          }
+        } else {
+          sourceNodeRef.current = null;
+          setIsPreparingAudio(false);
+        }
+      };
+      
+      sourceNodeRef.current = source;
+      setIsPreparingAudio(false);
+      source.start(0);
+      console.log('Audio source node started.');
+      
+    } catch (err) {
+      console.error('Error in TTS generation process:', err);
+      if (window.showToast) {
+        window.showToast(`Failed to play speech: ${err.message}`, 'error');
+      }
+      stopAndCleanupAudio();
     }
   };
 
@@ -283,6 +547,7 @@ const ChatPage = () => {
       
       // Function to process stream chunks
       const processStream = async ({ done, value }) => {
+        setLoading(false);
         if (done) {
           // Add the complete assistant message if it exists
           if (assistantResponse) {
@@ -293,16 +558,15 @@ const ChatPage = () => {
             setMessages(finalMessages);
             
             // Generate TTS after the message is complete
+            console.log('Stream complete, TTS enabled:', ttsEnabled);
             if (ttsEnabled) {
-              const messageElements = messageContainerRef.current.querySelectorAll('.chat-message.assistant');
-              const lastMessageElement = messageElements[messageElements.length - 1];
-              if (lastMessageElement) {
-                generateTTS(assistantResponse, lastMessageElement);
-              }
+              // Short timeout to ensure UI is updated first
+              setTimeout(() => {
+                generateTTS(assistantResponse);
+              }, 100);
             }
           }
           
-          setLoading(false);
           return;
         }
         
@@ -336,13 +600,11 @@ const ChatPage = () => {
               
               // Check if stream is finished
               if (jsonData.choices && jsonData.choices[0] && jsonData.choices[0].finish_reason === 'stop') {
-                setLoading(false);
               }
             } catch (error) {
               console.error('Error parsing event:', error);
             }
           } else if (line === 'data: [DONE]') {
-            setLoading(false);
           }
         }
         
@@ -382,12 +644,15 @@ const ChatPage = () => {
 
   const handleClearChat = () => {
     if (window.confirm('Are you sure you want to clear the current chat?')) {
+      // Synchronously clear local state
       setMessages([]);
       setShowEmptyState(true);
-      
-      // Add this line to set the cleared flag
       localStorage.setItem('chatCleared', 'true');
-      
+
+      // Optimistically update the UI (clear the chat)
+      setMessages([]);
+      setShowEmptyState(true);
+
       // Clear server-side history
       fetch('/v1/clear-conversation', {
         method: 'POST',
@@ -409,12 +674,42 @@ const ChatPage = () => {
     }
   };
 
-  const handleNewChat = () => {
-    handleClearChat();
-    if (isMobile) {
-      setShowSidebar(false);
-    }
-  };
+    const handleNewChat = () => {
+      // Synchronously clear local state
+      setMessages([]);
+      setShowEmptyState(true);
+
+      // Set localStorage flag synchronously
+      localStorage.setItem('chatCleared', 'true');
+
+      // Immediately update UI (clear the chat)
+      setMessages([]);
+      setShowEmptyState(true);
+
+
+      // Clear server-side history
+      fetch('/v1/clear-conversation', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ conversation_id: 'current_session' })
+      })
+        .then(response => {
+          if (response.ok) {
+            console.log('Server-side history cleared successfully');
+          } else {
+            console.warn('Failed to clear server-side history:', response.statusText);
+          }
+        })
+        .catch(error => {
+          console.error('Error clearing server-side history:', error);
+        });
+
+      if (isMobile) {
+        setShowSidebar(false);
+      }
+    };
 
   const handleSuggestionClick = (suggestion) => {
     setInputValue(suggestion);
@@ -427,7 +722,6 @@ const ChatPage = () => {
     <div className="flex h-screen">
       <Sidebar 
         onNewChat={handleNewChat}
-        onClearChat={handleClearChat}
         conversations={[{ id: 'current_session', title: 'Current Conversation', active: true }]}
         isMobile={isMobile}
         showSidebar={showSidebar}
@@ -538,31 +832,33 @@ const ChatPage = () => {
           </div>
         )}
         
-        {/* Fixed position footer instead of absolute */}
-        <div className="border-t border-border-color p-4 fixed bottom-0 left-0 right-0 bg-bg-color z-10">
+        <div className="border-t border-border-color p-4 bg-bg-color flex-shrink-0"> {/* Removed fixed positioning classes, added flex-shrink-0 */}
           <div className="relative max-w-3xl mx-auto">
-            <textarea
-              ref={textareaRef}
-              className="w-full bg-input-bg border border-border-color rounded-lg py-3 px-4 pr-12 text-text-color text-sm leading-6 resize-none h-13 max-h-52 overflow-y-auto"
-              placeholder="Message Sara..."
-              rows="1"
-              value={inputValue}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              disabled={loading}
-            />
-            <button
-              className="absolute right-3 bottom-3 text-accent-color hover:text-accent-hover transition-colors disabled:text-muted-color disabled:cursor-not-allowed p-1 rounded"
-              onClick={handleSendMessage}
-              disabled={!inputValue.trim() || loading}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13"></line>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-              </svg>
-            </button>
+              <textarea
+                ref={textareaRef}
+                className="w-full bg-input-bg border border-border-color rounded-lg py-3 px-4 pr-12 text-text-color text-sm leading-6 resize-none h-13 max-h-52 overflow-y-auto"
+                style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                placeholder="Message Sara..."
+                rows="1"
+                value={inputValue}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                disabled={loading}
+              />
+              <button
+                className="absolute right-3 bottom-3 text-accent-color hover:text-accent-hover transition-colors disabled:text-muted-color disabled:cursor-not-allowed p-1 rounded"
+                onClick={handleSendMessage}
+                disabled={!inputValue.trim() || loading}
+                type="button"
+              >
+                {/* SVG Icon */}
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+              </button>
           </div>
-        </div>
+      </div>
       </div>
       
       <BriefingModal

@@ -10,13 +10,14 @@ INTENT_TO_TOOL_MAP = {
     "remember": ["append_core_memory"],
     "append_core_memory": ["append_core_memory"],  # Add this line
     "note_create": ["create_note"],
-    "note_read": ["read_note"],
-    "note_update": ["append_note"],
-    "note_delete": ["delete_note"],
-    "note_list": ["list_notes"],
+    "read_note": ["read_note"],
+    "append_note": ["append_note"],
+    "delete_note": ["delete_note"],
+    "list_notes": ["list_notes"],
     "thinking": ["send_message"],
-    "timer_set": ["set_timer"],
-    "reminder_set": ["set_reminder"],
+    "set_timer": ["set_timer"],
+    "set_reminder": ["set_reminder"],
+    "create_note": ["create_note"],
     "none": []  # No tools for general conversation
 }
 

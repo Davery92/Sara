@@ -55,6 +55,7 @@
   }
 }
 
+
 @keyframes pulse {
   0%, 100% {
     @apply opacity-40 scale-75;

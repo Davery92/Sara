@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 import logging
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+from .notification_service import NotificationService
 
 # Set up logging
 logger = logging.getLogger("searxng-module")
@@ -419,10 +420,10 @@ def save_briefing(briefing, query, briefing_model="model", output_dir="/home/dav
     # Send notifications
     try:
         # Import notification service
-        from notification_service import notification_service
+        #from notification_service import notification_service
         
         # Send ntfy notification
-        notification_service.send_briefing_completion_notification(query, filename)
+        NotificationService.send_briefing_completion_notification(query, filename)
         logger.info(f"Sent notification for completed briefing: {query}")
     except Exception as e:
         logger.error(f"Error sending briefing notification: {str(e)}")

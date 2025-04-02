@@ -30,7 +30,7 @@ from fastapi import BackgroundTasks, APIRouter
 from modules.neo4j_rag_integration import Neo4jRAGManager, get_neo4j_rag_manager
 from modules.rag_api_simplified import rag_router
 from modules.rag_integration_simplified import integrate_rag_with_server, update_system_prompt_with_rag_info
-
+import time as python_time
 from fastapi.middleware.cors import CORSMiddleware
 from modules.timer_reminder_integration import integrate_timer_reminder_tools
 from modules.neo4j_integration import get_message_store, integrate_neo4j_with_server
@@ -46,6 +46,8 @@ import requests
 import re
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
+from modules.conversation_memory_module import setup_conversation_memory
+
 
 
 # Initialize the message store with Neo4j backend
@@ -138,35 +140,160 @@ MODEL_URLS = {
     "gemma3:12b": "http://localhost:11434/api/chat",
 }
 
-
 # WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
         self.active_connections = []
+        # Store metadata separately to avoid attribute errors
+        self.connection_metadata = {}  # key: connection object ID, value: metadata dict
+        # Track connections by client IP to identify duplicates
+        self.connections_by_ip = {}  # key: client IP, value: list of connection IDs
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
+        
+        # Get client IP
+        client_ip = websocket.client.host
+        
+        # Generate a unique connection ID
+        connection_id = str(uuid4())
+        
+        # Store metadata using object ID as key
+        connection_meta = {
+            "connected_at": datetime.now().isoformat(),
+            "client_ip": client_ip,
+            "connection_id": connection_id,
+            "path": websocket.url.path  # Add the WebSocket path for debugging
+        }
+        
+        # Check for possible duplicate connections from same IP
+        if client_ip in self.connections_by_ip:
+            # Log potential duplicate connection
+            existing_count = len(self.connections_by_ip[client_ip])
+            logger.warning(
+                f"Potential duplicate connection from {client_ip}. "
+                f"This IP already has {existing_count} active connections."
+            )
+            
+            # Add detailed log about existing connections
+            for conn_id in self.connections_by_ip[client_ip]:
+                for conn_obj_id, meta in self.connection_metadata.items():
+                    if meta.get("connection_id") == conn_id:
+                        logger.warning(
+                            f"Existing connection from {client_ip}: "
+                            f"ID={conn_id}, Path={meta.get('path')}, "
+                            f"Connected at={meta.get('connected_at')}"
+                        )
+        
+        # Add to our tracking collections
         self.active_connections.append(websocket)
+        self.connection_metadata[id(websocket)] = connection_meta
+        
+        # Add to IP tracking
+        if client_ip not in self.connections_by_ip:
+            self.connections_by_ip[client_ip] = []
+        self.connections_by_ip[client_ip].append(connection_id)
+        
+        logger.info(f"New connection: {connection_id} from {client_ip} to {websocket.url.path}")
+        return connection_id
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
+            # Get metadata before removing
+            connection_id = "unknown"
+            client_ip = "unknown"
+            
+            if id(websocket) in self.connection_metadata:
+                meta = self.connection_metadata[id(websocket)]
+                connection_id = meta.get("connection_id", "unknown")
+                client_ip = meta.get("client_ip", "unknown")
+                
+                # Remove from IP tracking
+                if client_ip in self.connections_by_ip and connection_id in self.connections_by_ip[client_ip]:
+                    self.connections_by_ip[client_ip].remove(connection_id)
+                    # Clean up empty IP entries
+                    if not self.connections_by_ip[client_ip]:
+                        del self.connections_by_ip[client_ip]
+                
+                # Clean up metadata
+                del self.connection_metadata[id(websocket)]
+                
+            # Remove from active connections
             self.active_connections.remove(websocket)
+            logger.info(f"Connection {connection_id} from {client_ip} disconnected")
 
     async def send_personal_message(self, message: str, websocket: WebSocket):
         await websocket.send_text(message)
 
     async def broadcast(self, message: str):
+        disconnected = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
             except Exception as e:
                 logger.error(f"Error broadcasting message: {str(e)}")
-                # Remove failed connections
-                self.disconnect(connection)
+                # Mark for removal
+                disconnected.append(connection)
+        
+        # Remove failed connections
+        for conn in disconnected:
+            self.disconnect(conn)
 
-# Create a connection manager instance
+    async def start_heartbeat(self):
+        """Send periodic heartbeats to verify connections are alive"""
+        while True:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            
+            # Log number of active connections
+            logger.info(f"Heartbeat: {len(self.active_connections)} active connections, "
+                       f"{len(self.connections_by_ip)} unique IPs")
+            
+            # Log connections by IP for debugging
+            for ip, conn_ids in self.connections_by_ip.items():
+                if len(conn_ids) > 1:
+                    logger.info(f"IP {ip} has {len(conn_ids)} connections: {conn_ids}")
+            
+            # Check all connections
+            disconnected = []
+            for connection in self.active_connections:
+                try:
+                    # Get connection ID from our metadata
+                    meta = self.connection_metadata.get(id(connection), {})
+                    connection_id = meta.get("connection_id", "unknown")
+                    
+                    # Send a ping message
+                    current_timestamp = int(datetime.now().timestamp())
+                    await connection.send_text(json.dumps({
+                        "type": "ping", 
+                        "timestamp": current_timestamp,
+                        "connection_id": connection_id
+                    }))
+                    
+                except Exception as e:
+                    logger.warning(f"Connection appears dead: {str(e)}")
+                    disconnected.append(connection)
+            
+            # Clean up disconnected connections
+            for conn in disconnected:
+                self.disconnect(conn)
+    
+    def get_connection_stats(self):
+        """Get statistics about current connections"""
+        # Count connections by path
+        paths = {}
+        for meta in self.connection_metadata.values():
+            path = meta.get("path", "unknown")
+            if path not in paths:
+                paths[path] = 0
+            paths[path] += 1
+        
+        return {
+            "total_connections": len(self.active_connections),
+            "unique_ips": len(self.connections_by_ip),
+            "connections_by_path": paths,
+            "connections_by_ip": {ip: len(conns) for ip, conns in self.connections_by_ip.items()}
+        }
 websocket_manager = ConnectionManager()
-
 # Redis connection setup
 class RedisClient:
     def __init__(self, host='localhost', port=6379, db=0):
@@ -485,7 +612,16 @@ def integrate_briefings_with_server(app):
 
 @app.on_event("startup")
 async def startup_event():
-    """Log when the server starts up and check database connections"""
+    """Store the application start time and setup connection tracking"""
+    # Store the start time for uptime calculation
+    app.state.start_time = python_time.time()
+    
+    # Start the heartbeat task
+    asyncio.create_task(websocket_manager.start_heartbeat())
+    
+    logger.info("WebSocket heartbeat monitoring started")
+    
+    # Include any other existing code from your original startup_event
     global SYSTEM_PROMPT, TOOL_SYSTEM_PROMPT_TEMPLATE
     
     logger.info("=" * 50)
@@ -496,9 +632,6 @@ async def startup_event():
     # Load system prompts
     SYSTEM_PROMPT = load_system_prompt()
     logger.info("System prompt loaded")
-    
-    # Include the RAG router
-    
     
     # Initialize intent classifier
     intent_classifier = get_intent_classifier()
@@ -525,6 +658,9 @@ async def startup_event():
     
     asyncio.create_task(periodic_save_history())
     logger.info("Started periodic conversation history saving")
+
+    asyncio.create_task(websocket_manager.start_heartbeat())
+    logger.info("Started WebSocket heartbeat monitoring")
     
     # Check Redis connection
     if message_store.ping():
@@ -552,6 +688,14 @@ async def startup_event():
 
     logger.info("Server ready to accept connections")
     logger.info("=" * 50)
+
+    setup_conversation_memory(
+        app,                # Your FastAPI application
+        message_store,      # Your existing message store
+        max_messages=40     # Process after 40 messages
+    )
+    
+    logger.info("Conversation memory system added to server")
 
     # Check Neo4j connection
     neo4j_status = check_neo4j_connection()
@@ -624,12 +768,35 @@ async def delete_conversation(conversation_id: str):
 @app.websocket("/ws/briefings")
 async def websocket_briefing_status(websocket: WebSocket):
     """WebSocket endpoint for real-time briefing status updates"""
-    await websocket_manager.connect(websocket)
+    # Connect and get connection ID
+    connection_id = await websocket_manager.connect(websocket)
+    
+    # Send connection confirmation to client
+    await websocket.send_text(json.dumps({
+        "type": "connection_established",
+        "connection_id": connection_id,
+        "message": "Briefing WebSocket connection established",
+        "timestamp": datetime.now().isoformat()
+    }))
+    
     try:
         while True:
-            # Just wait for messages (we won't use them, but this keeps the connection alive)
-            await websocket.receive_text()
+            # Keep the connection alive by waiting for messages
+            msg = await websocket.receive_text()
+            # Process any messages from client (mostly pong responses)
+            try:
+                data = json.loads(msg)
+                if data.get("type") == "pong":
+                    # Update metadata for this connection if needed
+                    if id(websocket) in websocket_manager.connection_metadata:
+                        websocket_manager.connection_metadata[id(websocket)]["last_pong"] = datetime.now().isoformat()
+            except:
+                pass  # Silently ignore malformed messages
     except WebSocketDisconnect:
+        # Clean up on disconnect
+        websocket_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Error in briefing WebSocket: {str(e)}")
         websocket_manager.disconnect(websocket)
 
 @app.get("/conversations/{conversation_id}")
@@ -3823,6 +3990,76 @@ async def tts_status():
             return {"status": "error", "message": f"TTS service returned status code {response.status_code}"}
     except Exception as e:
         return {"status": "offline", "message": f"TTS service is unavailable: {str(e)}"}
+
+
+
+@app.websocket("/ws/chat")
+async def websocket_chat_status(websocket: WebSocket):
+    """WebSocket endpoint for tracking active chat windows"""
+    # Connect and get a connection ID
+    connection_id = await websocket_manager.connect(websocket)
+    
+    # Send connection ID to client
+    await websocket.send_text(json.dumps({
+        "type": "connection_established",
+        "connection_id": connection_id,
+        "message": "Chat WebSocket connection established",
+        "timestamp": datetime.now().isoformat()
+    }))
+    
+    try:
+        while True:
+            # Handle messages from client
+            data = await websocket.receive_text()
+            try:
+                message = json.loads(data)
+                
+                # Handle pong responses
+                if message.get("type") == "pong":
+                    # Update metadata for this connection
+                    if id(websocket) in websocket_manager.connection_metadata:
+                        websocket_manager.connection_metadata[id(websocket)]["last_pong"] = datetime.now().isoformat()
+                        websocket_manager.connection_metadata[id(websocket)]["last_seen"] = datetime.now().isoformat()
+            except:
+                pass  # Silently ignore malformed messages
+    except WebSocketDisconnect:
+        websocket_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Error in chat WebSocket: {str(e)}")
+        websocket_manager.disconnect(websocket)
+
+@app.get("/v1/websockets/stats")
+async def websocket_stats():
+    """Get statistics about WebSocket connections"""
+    stats = websocket_manager.get_connection_stats()
+    
+    # Add some additional system information
+    stats["server_time"] = datetime.now().isoformat()
+    stats["uptime_seconds"] = int(python_time.time() - app.state.start_time) if hasattr(app.state, "start_time") else "unknown"
+    
+    return stats
+    
+    return stats
+
+# Add a new API endpoint to check active connections
+@app.get("/v1/connections/status")
+async def get_connection_status():
+    """Get information about active WebSocket connections"""
+    connections = [
+        {
+            "id": i,
+            "connected_at": getattr(conn, "user_data", {}).get("connected_at", None),
+            "client_ip": getattr(conn, "user_data", {}).get("client_ip", "unknown"),
+            "last_seen": getattr(conn, "user_data", {}).get("last_seen", None)
+        }
+        for i, conn in enumerate(websocket_manager.active_connections)
+    ]
+    
+    return {
+        "active_connections": len(websocket_manager.active_connections),
+        "connections": connections
+    }
+
 
 @app.post("/v1/debug/classify-intent")
 async def debug_classify_intent(request: dict = Body(...)):
