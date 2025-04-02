@@ -4,6 +4,7 @@ import Sidebar from '../components/Sidebar';
 import BriefingModal from '../components/BriefingModal';
 import { formatMessage, cleanTextForTTS } from '../utils/formatters'; // Added cleanTextForTTS import
 import SuggestionChip from '../components/SuggestionChip';
+import webSocketManager from '../utils/websocketUtil';
 
 // Helper to ensure AudioContext is available
 const getAudioContext = () => {
@@ -45,29 +46,23 @@ const ChatPage = () => {
   const sourceNodeRef = useRef(null);
   const audioBufferRef = useRef(null);
 
-  // WebSocket for briefing notifications
   useEffect(() => {
-    // Check if WebSocket is supported
-    if (!('WebSocket' in window)) {
-      console.warn('WebSockets not supported in this browser');
-      return;
-    }
-
-    // Determine WebSocket URL based on current location
+    // Define the WebSocket URLs based on current location
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/briefings`;
+    const briefingsUrl = `${protocol}//${window.location.host}/ws/briefings`;
+    const chatUrl = `${protocol}//${window.location.host}/ws/chat`;
     
-    // Create WebSocket connection
-    const socket = new WebSocket(wsUrl);
-    
-    socket.onopen = () => {
-      console.log('WebSocket connection established for briefing notifications');
+    // Set up briefings WebSocket
+    const briefingsOptions = {
+      autoReconnect: true,
+      maxReconnectAttempts: 3,
+      reconnectDelay: 3000,
+      debug: true
     };
     
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        
+    // Register handlers for briefings WebSocket
+    webSocketManager.registerHandlers('briefings', {
+      message: (data) => {
         // Handle briefing completion notification
         if (data.type === 'briefing_completed') {
           // Show toast notification using the global showToast function
@@ -83,26 +78,54 @@ const ChatPage = () => {
           const notificationSound = new Audio('/notification.mp3');
           notificationSound.play().catch(e => console.warn('Error playing notification sound:', e));
         }
-      } catch (error) {
-        console.error('Error handling WebSocket message:', error);
+      },
+      error: (error) => {
+        console.error('Briefing WebSocket error:', error);
+      },
+      open: () => {
+        console.log('Briefing WebSocket connection established');
+      },
+      close: (event) => {
+        console.log('Briefing WebSocket connection closed:', event.code, event.reason);
       }
+    });
+    
+    // Set up chat WebSocket
+    const chatOptions = {
+      autoReconnect: true,
+      maxReconnectAttempts: 3,
+      reconnectDelay: 3000,
+      debug: true
     };
     
-    socket.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
+    // Register handlers for chat WebSocket
+    webSocketManager.registerHandlers('chat', {
+      message: (data) => {
+        // Nothing special to do here as pings are automatically handled
+      },
+      error: (error) => {
+        console.error('Chat WebSocket error:', error);
+      },
+      open: () => {
+        console.log('Chat WebSocket connection established');
+      },
+      close: (event) => {
+        console.log('Chat WebSocket connection closed:', event.code, event.reason);
+      }
+    });
     
-    socket.onclose = () => {
-      console.log('WebSocket connection closed');
-    };
+    // Establish the connections
+    webSocketManager.getConnection(briefingsUrl, 'briefings', briefingsOptions);
+    webSocketManager.getConnection(chatUrl, 'chat', chatOptions);
     
-    // Clean up the WebSocket connection when component unmounts
+    // Clean up function to close WebSockets when component unmounts
     return () => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.close();
-      }
+      console.log('Closing WebSocket connections due to component unmount');
+      webSocketManager.closeConnection('briefings');
+      webSocketManager.closeConnection('chat');
     };
   }, []);
+
 
   // Initialize AudioContext - similar to BriefingModal
   useEffect(() => {
