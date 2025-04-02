@@ -5,22 +5,27 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 3000,
+    allowedHosts: ['talk.avery.cloud'],
     proxy: {
-      // API requests to the FastAPI server
+      // Add proxy for talk.avery.cloud
+      '/avery-api': {
+        target: 'https://talk.avery.cloud',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/avery-api/, '')
+      },
+      // Maintain existing proxies if any
       '/v1': {
         target: 'http://localhost:7009',
-        changeOrigin: true,
+        changeOrigin: true
       },
       '/health': {
         target: 'http://localhost:7009',
-        changeOrigin: true,
+        changeOrigin: true
       },
-      '/api': {
-        target: 'http://localhost:7009',
-        changeOrigin: true,
-      },
-    },
-    historyApiFallback: true
+      '/ws': {
+        target: 'ws://localhost:7009',
+        ws: true
+      }
     }
+  }
 })
